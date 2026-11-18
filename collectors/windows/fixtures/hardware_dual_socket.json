@@ -1,0 +1,19 @@
+{
+  "processors": [
+    { "Name": "Intel(R) Xeon(R) Gold 6248 CPU @ 2.50GHz", "NumberOfCores": 8, "NumberOfLogicalProcessors": 16 },
+    { "Name": "Intel(R) Xeon(R) Gold 6248 CPU @ 2.50GHz", "NumberOfCores": 8, "NumberOfLogicalProcessors": 16 }
+  ],
+  "cs": [
+    { "Manufacturer": "Dell Inc.", "Model": "PowerEdge R650", "TotalPhysicalMemory": 68719476736 }
+  ],
+  "bios": [ { "SerialNumber": "ABC123XYZ" } ],
+  "disks": [
+    { "Size": 107374182400 },
+    { "Size": 107374182400 }
+  ],
+  "volumes": [
+    { "DriveType": 3, "DeviceID": "C:", "FileSystem": "NTFS", "Size": 107374182400, "FreeSpace": 64424509440 },
+    { "DriveType": 3, "DeviceID": "D:", "FileSystem": "NTFS", "Size": 53687091200, "FreeSpace": 53687091200 },
+    { "DriveType": 5, "DeviceID": "E:", "FileSystem": null, "Size": null, "FreeSpace": null }
+  ]
+}

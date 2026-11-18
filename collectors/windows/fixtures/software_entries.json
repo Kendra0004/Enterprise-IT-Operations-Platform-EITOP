@@ -1,0 +1,38 @@
+[
+  {
+    "scope": "registry-hklm64", "precedence": 3,
+    "raw": { "DisplayName": "7-Zip 24.07 (x64)", "DisplayVersion": "24.07", "Publisher": "Igor Pavlov", "InstallDate": "20260115" }
+  },
+  {
+    "scope": "registry-hklm64", "precedence": 3,
+    "raw": { "DisplayName": "Mozilla Firefox", "DisplayVersion": "133.0", "Publisher": "Mozilla", "InstallDate": "20260201" }
+  },
+  {
+    "scope": "registry-hklm32", "precedence": 2,
+    "raw": { "DisplayName": "Old 32-bit Tool", "DisplayVersion": "1.2.3", "Publisher": "Vendor" }
+  },
+  {
+    "scope": "registry-hkcu", "precedence": 1,
+    "raw": { "DisplayName": "Mozilla Firefox", "DisplayVersion": "133.0", "Publisher": "Mozilla" }
+  },
+  {
+    "scope": "registry-hklm64", "precedence": 3,
+    "raw": { "DisplayName": "Hidden System Component", "DisplayVersion": "1.0", "SystemComponent": 1 }
+  },
+  {
+    "scope": "registry-hklm64", "precedence": 3,
+    "raw": { "DisplayName": "Patch KB123456", "ParentKeyName": "MSIPatch" }
+  },
+  {
+    "scope": "registry-hklm64", "precedence": 3,
+    "raw": { "DisplayName": "Security Update for Windows", "ReleaseType": "Security Update" }
+  },
+  {
+    "scope": "registry-hklm64", "precedence": 3,
+    "raw": { "DisplayVersion": "9.9.9" }
+  },
+  {
+    "scope": "registry-hklm64", "precedence": 3,
+    "raw": { "DisplayName": "Microsoft Visual C++ 2015-2022 Redistributable (x64)", "DisplayVersion": "14.38.33135", "Publisher": "Microsoft Corporation", "InstallDate": "20251101" }
+  }
+]

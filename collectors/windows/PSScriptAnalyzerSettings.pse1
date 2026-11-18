@@ -1,0 +1,45 @@
+@{
+    # PSScriptAnalyzer settings for the EITOP Windows collector.
+    # Rules below are excluded because the behavior is required by design;
+    # each entry documents why. Everything else (incl. security rules like
+    # PSAvoidUsingPlainTextForPassword-adjacent checks, unused vars, BOM)
+    # stays ENABLED and must pass clean.
+    ExcludeRules = @(
+        # The endpoint credential is a string bearer token issued by the API
+        # (JSON → in-memory string). Wrapping every flow in PSCredential would
+        # not reduce exposure (the value is already plaintext in memory at
+        # rest-of-process boundaries) and would break the injectable test
+        # seams. Storage at rest is DPAPI-protected (Credentials.psm1).
+        'PSAvoidUsingPlainTextForPassword',
+        'PSUsePSCredentialType',
+
+        # Save-EitopCredential must wrap the API-issued string into a
+        # SecureString to feed ConvertFrom-SecureString (DPAPI protection).
+        # The plaintext exists only in that transient SecureString; call-site
+        # comment documents it. This is the standard PowerShell bridge from a
+        # string credential to a protected blob.
+        'PSAvoidUsingConvertToSecureStringWithPlainText',
+
+        # Names chosen for readability/parity with the Linux collector
+        # (Get-UninstallRegistryPaths, ConvertTo-PackageReports,
+        # Get-EitopDefaultConfigPaths). Renaming gains nothing.
+        'PSUseSingularNouns',
+
+        # Internal module functions, not interactive public cmdlets: their
+        # state changes are local credential-file writes guarded by atomic
+        # temp+rename and covered by tests. -WhatIf semantics add no safety
+        # here (nothing external/irreversible is touched).
+        'PSUseShouldProcessForStateChangingFunctions',
+
+        # Empty catch blocks are intentional silent-degradation paths
+        # (non-interactive console host, JSON-parse fallbacks, optional CIM
+        # properties). Each has an inline comment; upstream always has an
+        # explicit fallback. Logging inside would spam the daemon loop.
+        'PSAvoidUsingEmptyCatchBlock',
+
+        # Injectable DI seams (Invoker/Sleep/collector scriptblocks) and
+        # .NET-delegate-shaped test callbacks must declare parameters they
+        # do not use (positional signature compatibility).
+        'PSReviewUnusedParameter'
+    )
+}

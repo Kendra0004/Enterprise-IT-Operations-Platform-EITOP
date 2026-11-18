@@ -1,0 +1,18 @@
+{
+  "os": {
+    "Caption": "Microsoft Windows 11 Pro",
+    "Version": "10.0.26100",
+    "BuildNumber": "26100",
+    "OSArchitecture": "64-bit",
+    "DisplayVersion": "24H2",
+    "LastBootUpTime": "2026-11-18T08:30:00"
+  },
+  "cs": {
+    "DNSHostName": "web01.example.com",
+    "Manufacturer": "QEMU",
+    "Model": "Standard PC (Q35 + ICH9, 2009)",
+    "TotalPhysicalMemory": 8589934592
+  },
+  "hostname": "WEB01",
+  "utc_now": "2026-11-18T11:00:00Z"
+}
