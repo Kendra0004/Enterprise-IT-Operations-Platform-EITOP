@@ -30,12 +30,23 @@ curl -s http://localhost:8000/health/ready    # db + redis checks
 open http://localhost:8080                    # SPA
 ```
 
-Create the first admin user (only runs when the user table is empty):
+Create the first admin user (only runs when the user table is empty).
+**Never pass the password as a CLI argument** — use the hidden prompt, the
+environment, or stdin:
 
 ```bash
-docker compose exec backend python -m app.db.seed \
-  --admin-email admin@example.com \
-  --admin-password 'Your#Str0ngPass!'
+# Interactive (hidden prompt, TTY)
+docker compose exec backend python -m app.db.seed --admin-email admin@example.com
+
+# Scripted: environment (recommended)
+docker compose exec \
+  -e BOOTSTRAP_ADMIN_EMAIL=admin@example.com \
+  -e BOOTSTRAP_ADMIN_PASSWORD='Your#Str0ngPass!' \
+  backend python -m app.db.seed
+
+# Scripted: stdin
+printf '%s\n' 'Your#Str0ngPass!' | docker compose exec -T -i backend \
+  python -m app.db.seed --admin-email admin@example.com --admin-password-stdin
 ```
 
 > Password must be ≥12 characters. `.local`, `.test` and other special-use

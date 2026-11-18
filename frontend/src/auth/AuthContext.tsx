@@ -7,7 +7,14 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { api, clearTokens, getStoredRefreshToken, setTokens } from "../api/client";
+import {
+  api,
+  clearTokens,
+  hasSessionHint,
+  setAccessToken,
+  setSessionHint,
+  type TokenPair,
+} from "../api/client";
 
 export interface UserInfo {
   id: string;
@@ -33,11 +40,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<UserInfo | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // On mount: try to restore the session from the stored refresh token.
+  // On mount: when a session hint exists, restore via /auth/me — the API
+  // client transparently rotates the HttpOnly refresh cookie on 401.
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (!getStoredRefreshToken()) {
+      if (!hasSessionHint()) {
         if (!cancelled) setLoading(false);
         return;
       }
@@ -57,21 +65,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = useCallback(async (email: string, password: string) => {
-    const pair = await api.post<{
-      access_token: string;
-      refresh_token: string;
-    }>("/auth/login", { email, password }, { auth: false });
-    setTokens(pair.access_token, pair.refresh_token);
+    const pair = await api.post<TokenPair>(
+      "/auth/login",
+      { email, password },
+      { auth: false },
+    );
+    // Access token → memory only. Refresh token → HttpOnly cookie (server).
+    setAccessToken(pair.access_token);
+    setSessionHint(true);
     const me = await api.get<UserInfo>("/auth/me");
     setUser(me);
   }, []);
 
   const logout = useCallback(async () => {
-    const stored = getStoredRefreshToken();
     try {
-      if (stored) {
-        await api.post<void>("/auth/logout", { refresh_token: stored });
-      }
+      // Server revokes the refresh family from the cookie and clears it.
+      await api.post<void>("/auth/logout");
     } catch {
       // Even if the server call fails, drop local session state.
     }

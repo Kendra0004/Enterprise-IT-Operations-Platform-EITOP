@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
-from fastapi import status
+from fastapi import Response, status
 
 from app.core.config import get_settings
 from app.core.exceptions import AppError
@@ -29,6 +29,18 @@ _hasher = PasswordHasher(time_cost=2, memory_cost=19 * 1024, parallelism=1)
 JWT_ALGORITHM = "HS256"
 JWT_ISSUER = "eitop"
 ACCESS_TOKEN_TYPE = "access"
+
+# Refresh tokens travel ONLY in an HttpOnly cookie (never in a response body
+# and never in localStorage) so injected scripts cannot exfiltrate them.
+REFRESH_COOKIE_NAME = "eitop_refresh"
+REFRESH_COOKIE_PATH = "/api/v1/auth"
+# Non-secret presence hint so the SPA can decide whether to probe /auth/me
+# on load. Knowing "a session might exist" grants an attacker nothing.
+SESSION_HINT_KEY = "eitop.session"
+
+# Lazily-built dummy hash: unknown/inactive logins still pay one full Argon2
+# verification so response timing does not reveal whether an account exists.
+_DUMMY_HASH: str | None = None
 
 
 def hash_password(plaintext: str) -> str:
@@ -50,6 +62,15 @@ def needs_rehash(hashed: str) -> bool:
         return _hasher.check_needs_rehash(hashed)
     except InvalidHashError:
         return True
+
+
+def dummy_password_hash() -> str:
+    """Return (building once) a hash of a random secret for timing-equalized
+    failed logins. The secret is ephemeral and never used to authenticate."""
+    global _DUMMY_HASH
+    if _DUMMY_HASH is None:
+        _DUMMY_HASH = hash_password(secrets.token_urlsafe(32))
+    return _DUMMY_HASH
 
 
 def create_access_token(user_id: uuid.UUID, email: str) -> tuple[str, int]:
@@ -77,7 +98,7 @@ def decode_access_token(token: str) -> dict:
         payload = jwt.decode(
             token,
             settings.secret_key,
-            algorithms=[JWT_ISSUER and JWT_ALGORITHM],
+            algorithms=[JWT_ALGORITHM],
             issuer=JWT_ISSUER,
         )
     except jwt.ExpiredSignatureError as exc:
@@ -102,6 +123,38 @@ def generate_refresh_token() -> tuple[str, str]:
     """
     raw = secrets.token_urlsafe(48)
     return raw, sha256_hex(raw)
+
+
+def set_refresh_cookie(response: Response, raw_token: str, max_age: int) -> None:
+    """Attach the refresh token as an HttpOnly cookie.
+
+    - ``HttpOnly``: unreadable from JavaScript (XSS cannot exfiltrate it).
+    - ``SameSite=Lax``: not sent on cross-site POSTs (CSRF mitigation).
+    - ``Secure``: set only in production (dev/demo runs over plain HTTP).
+    - ``Path=/api/v1/auth``: cookie is only ever sent to auth endpoints.
+    """
+    settings = get_settings()
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=raw_token,
+        max_age=max_age,
+        path=REFRESH_COOKIE_PATH,
+        httponly=True,
+        secure=settings.is_production,
+        samesite="lax",
+    )
+
+
+def clear_refresh_cookie(response: Response) -> None:
+    """Expire the refresh cookie (same attributes used when setting it)."""
+    settings = get_settings()
+    response.delete_cookie(
+        key=REFRESH_COOKIE_NAME,
+        path=REFRESH_COOKIE_PATH,
+        httponly=True,
+        secure=settings.is_production,
+        samesite="lax",
+    )
 
 
 def sha256_hex(value: str) -> str:

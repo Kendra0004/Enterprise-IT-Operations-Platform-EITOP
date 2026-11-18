@@ -157,8 +157,59 @@ def readonly_user(db):
 
 
 @pytest.fixture()
+def agent_user(db):
+    """Endpoint-collector identity: endpoints:write only."""
+    from app.core.security import hash_password
+    from app.db.seed import seed_rbac
+    from app.models import Role, User
+    from sqlalchemy import select
+
+    seed_rbac()
+    email = f"agent-{uuid.uuid4().hex[:8]}@example.com"
+    role = db.scalar(select(Role).where(Role.name == "agent"))
+    user = User(
+        email=email,
+        full_name="Test Agent",
+        hashed_password=hash_password("Str0ng!Passw0rd#2026"),
+        is_active=True,
+        roles=[role],
+    )
+    db.add(user)
+    db.commit()
+    return user
+
+
+@pytest.fixture()
+def auditor_user(db):
+    """Security auditor: audit:read but no admin:write."""
+    from app.core.security import hash_password
+    from app.db.seed import seed_rbac
+    from app.models import Role, User
+    from sqlalchemy import select
+
+    seed_rbac()
+    email = f"auditor-{uuid.uuid4().hex[:8]}@example.com"
+    role = db.scalar(select(Role).where(Role.name == "security_auditor"))
+    user = User(
+        email=email,
+        full_name="Test Auditor",
+        hashed_password=hash_password("Str0ng!Passw0rd#2026"),
+        is_active=True,
+        roles=[role],
+    )
+    db.add(user)
+    db.commit()
+    return user
+
+
+@pytest.fixture()
 def auth_headers(client, admin_user):
-    """Login as admin and return Authorization headers (fresh tokens)."""
+    """Login as admin and return Authorization headers (fresh tokens).
+
+    Clears the shared cookie jar first so session state never leaks between
+    tests (the TestClient cookie jar is session-scoped).
+    """
+    client.cookies.clear()
     resp = client.post(
         "/api/v1/auth/login",
         json={"email": admin_user.email, "password": "Str0ng!Passw0rd#2026"},

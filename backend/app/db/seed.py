@@ -138,19 +138,39 @@ def bootstrap_admin(email: str, password: str, full_name: str = "Administrator")
 
 if __name__ == "__main__":
     import argparse
+    import getpass
     import os
+    import sys
 
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description="Seed RBAC and optionally bootstrap admin")
     parser.add_argument("--admin-email", default=os.environ.get("BOOTSTRAP_ADMIN_EMAIL"))
-    parser.add_argument("--admin-password", default=os.environ.get("BOOTSTRAP_ADMIN_PASSWORD"))
+    parser.add_argument(
+        "--admin-password-stdin",
+        action="store_true",
+        help=(
+            "Read the admin password from stdin (one line) instead of the "
+            "environment. Passwords are NEVER accepted as command-line "
+            "arguments: argv is visible in `ps` and shell history."
+        ),
+    )
     args = parser.parse_args()
 
     seed_rbac()
-    if args.admin_email and args.admin_password:
-        if len(args.admin_password) < 12:
-            raise SystemExit("BOOTSTRAP_ADMIN_PASSWORD must be at least 12 characters")
-        created = bootstrap_admin(args.admin_email, args.admin_password)
+    if args.admin_email:
+        password = os.environ.get("BOOTSTRAP_ADMIN_PASSWORD")
+        if args.admin_password_stdin:
+            password = sys.stdin.readline().rstrip("\n")
+        elif not password and sys.stdin.isatty():
+            password = getpass.getpass("Admin password (min 12 chars, hidden): ")
+        if not password:
+            raise SystemExit(
+                "No admin password provided. Set BOOTSTRAP_ADMIN_PASSWORD, "
+                "pipe it via --admin-password-stdin, or run interactively."
+            )
+        if len(password) < 12:
+            raise SystemExit("Admin password must be at least 12 characters")
+        created = bootstrap_admin(args.admin_email, password)
         print(f"Admin bootstrap: {'created' if created else 'skipped (users exist)'}.")
     else:
         print("RBAC seed complete. (Set BOOTSTRAP_ADMIN_EMAIL/_PASSWORD to create first admin.)")

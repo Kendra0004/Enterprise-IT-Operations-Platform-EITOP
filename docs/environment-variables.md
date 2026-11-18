@@ -37,7 +37,14 @@ All configuration is environment-driven. Copy `.env.example` → `.env`.
 | Variable | Description |
 |---|---|
 | `BOOTSTRAP_ADMIN_EMAIL` | First admin email — used only when `users` table is empty |
-| `BOOTSTRAP_ADMIN_PASSWORD` | Min 12 chars; ignored once any user exists |
+| `BOOTSTRAP_ADMIN_PASSWORD` | Min 12 chars; ignored once any user exists. Prefer env/stdin — the seed CLI deliberately has **no password argument** (argv is visible in `ps`) |
+
+## Data services (compose)
+
+| Variable | Default | Description |
+|---|---|---|
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `eitop` / dev default / `eitop` | Dev defaults — **override in production** |
+| `REDIS_PASSWORD` | dev default | Enables Redis `--requirepass` inside the compose network |
 
 ## Frontend (Vite)
 

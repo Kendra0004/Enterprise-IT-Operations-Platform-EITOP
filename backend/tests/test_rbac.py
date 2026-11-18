@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from tests.conftest import requires_postgres, requires_redis
 
 pytestmark = [requires_postgres, requires_redis]
@@ -87,4 +89,80 @@ def test_invalid_token_rejected(client):
     resp = client.get(
         "/api/v1/users", headers={"Authorization": "Bearer not.a.token"}
     )
+    assert resp.status_code == 401
+
+
+def test_agent_cannot_list_users(client, agent_user):
+    headers = _login(client, agent_user.email)
+    resp = client.get("/api/v1/users", headers=headers)
+    assert resp.status_code == 403
+    assert "admin:read" in resp.json()["detail"]
+
+
+def test_agent_cannot_create_users(client, agent_user):
+    headers = _login(client, agent_user.email)
+    resp = client.post(
+        "/api/v1/users",
+        headers=headers,
+        json={
+            "email": f"esc-{uuid.uuid4().hex[:8]}@example.com",
+            "password": "Escalat#Passw0rd9",
+            "roles": ["admin"],
+        },
+    )
+    assert resp.status_code == 403
+
+
+def test_agent_cannot_read_audit_logs(client, agent_user):
+    headers = _login(client, agent_user.email)
+    resp = client.get("/api/v1/audit-logs", headers=headers)
+    assert resp.status_code == 403
+
+
+def test_agent_cannot_escalate_by_self_assigning_admin_role(client, agent_user):
+    """Vertical escalation attempt: agent tries to mint an admin account."""
+    headers = _login(client, agent_user.email)
+    resp = client.post(
+        "/api/v1/users",
+        headers=headers,
+        json={
+            "email": f"self-{uuid.uuid4().hex[:8]}@example.com",
+            "password": "SelfG#Privilege2026",
+            "roles": ["admin"],
+        },
+    )
+    assert resp.status_code == 403
+    # And the agent still holds only its original permission
+    me = client.get("/api/v1/auth/me", headers=headers).json()
+    assert me["roles"] == ["agent"]
+    assert "admin:write" not in me["permissions"]
+
+
+def test_auditor_can_read_audit_but_not_write_users(client, auditor_user):
+    headers = _login(client, auditor_user.email)
+    assert client.get("/api/v1/audit-logs", headers=headers).status_code == 200
+    resp = client.post(
+        "/api/v1/users",
+        headers=headers,
+        json={
+            "email": f"no-{uuid.uuid4().hex[:8]}@example.com",
+            "password": "Nope#Passw0rd2026",
+            "roles": ["readonly"],
+        },
+    )
+    assert resp.status_code == 403
+    assert client.get("/api/v1/users", headers=headers).status_code == 403
+
+
+def test_disabled_admin_token_is_401_not_403(client, auth_headers, admin_user):
+    """A valid token for a deactivated account must not authorize anything."""
+    from app.core.database import SessionLocal
+    from app.models import User
+
+    with SessionLocal() as s:
+        u = s.get(User, admin_user.id)
+        u.is_active = False
+        s.commit()
+
+    resp = client.get("/api/v1/users", headers=auth_headers)
     assert resp.status_code == 401

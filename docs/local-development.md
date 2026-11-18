@@ -9,6 +9,7 @@ docker compose up -d postgres redis   # only the data services
 
 # Backend (host venv)
 cd backend && source .venv/bin/activate
+pip install -r requirements-dev.txt   # runtime + test/lint toolchain
 uvicorn app.main:app --reload
 
 # Frontend (host)
@@ -49,6 +50,9 @@ docs/            # this documentation
 - Errors: raise `AppError(status, title, detail)` — handlers render RFC 9457.
 - Mutating operations that matter security-wise → `_record_audit(...)`.
 - Never log passwords, tokens, or `SECRET_KEY`.
+- Never pass passwords via command-line arguments (use env/stdin/getpass).
+- State-changing endpoints must keep working with the `Origin` check and
+  cookie-based refresh transport (see docs/authentication.md).
 
 ## Git workflow
 

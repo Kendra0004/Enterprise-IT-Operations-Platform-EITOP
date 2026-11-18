@@ -14,19 +14,17 @@ class LoginRequest(BaseModel):
 
 
 class TokenResponse(BaseModel):
+    """Token pair for the caller.
+
+    The refresh token is intentionally NOT part of the body: it is delivered
+    exclusively through an HttpOnly ``Set-Cookie`` header so JavaScript (and
+    therefore XSS) can never read it.
+    """
+
     access_token: str
     token_type: str = "bearer"
     expires_in: int
-    refresh_token: str
     refresh_expires_in: int
-
-
-class RefreshRequest(BaseModel):
-    refresh_token: str = Field(min_length=16, max_length=512)
-
-
-class LogoutRequest(BaseModel):
-    refresh_token: str = Field(min_length=16, max_length=512)
 
 
 class UserCreate(BaseModel):

@@ -12,14 +12,19 @@ and IT automation.
 
 - FastAPI backend with versioned REST API (`/api/v1`)
 - Argon2id password hashing, JWT access tokens, rotating refresh tokens
-  with reuse detection
+  with reuse detection; refresh token in an **HttpOnly cookie** (never in
+  JSON bodies or localStorage) with CSRF Origin checks
 - Role-based access control (admin, security_auditor, operator, readonly, agent)
-- Audit logging of authentication and privileged actions
+- Audit logging of authentication and privileged actions — append-only at
+  the application *and* database level (PostgreSQL trigger)
 - Structured JSON logging, RFC 9457 problem responses, health/readiness probes
-- Redis-backed rate limiting on auth endpoints (fails closed)
+- Security headers (nosniff, frame deny, referrer policy, CSP on the SPA)
+- Redis-backed rate limiting on auth endpoints (fails closed; proxy
+  overwrites `X-Forwarded-For` so the key cannot be spoofed)
 - React + TypeScript + Vite + Tailwind CSS + TanStack Query frontend
-- Docker Compose stack (backend, worker, frontend, PostgreSQL, Redis)
-- GitHub Actions CI (ruff, mypy, pytest, frontend tests)
+- Docker Compose stack (backend, worker, frontend, PostgreSQL, Redis with
+  requirepass; data services unpublished, backend loopback-only)
+- GitHub Actions CI (ruff, mypy, pytest, frontend tests, Trivy scan)
 
 ## Quick start (Docker)
 
@@ -40,7 +45,7 @@ Requires Python 3.12, Node 20+, PostgreSQL, Redis. See
 # Backend
 cd backend
 python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 alembic upgrade head
 python -m app.db.seed          # seed roles + permissions
 uvicorn app.main:app --reload
@@ -71,6 +76,7 @@ cd frontend && npm test
 | RBAC model | [docs/rbac.md](docs/rbac.md) |
 | API documentation | [docs/api.md](docs/api.md) |
 | Running tests | [docs/testing.md](docs/testing.md) |
+| Phase 1 security review | [docs/security/PHASE1_SECURITY_REVIEW.md](docs/security/PHASE1_SECURITY_REVIEW.md) |
 
 ## Security
 

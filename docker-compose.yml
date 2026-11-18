@@ -21,7 +21,15 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    environment:
+      # REDISCLI_AUTH makes `redis-cli` (healthcheck) authenticate.
+      REDISCLI_AUTH: ${REDIS_PASSWORD:-eitop-dev-redis}
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:-eitop-dev-redis}
     volumes:
       - redisdata:/data
     healthcheck:
@@ -37,6 +45,7 @@ services:
   backend:
     build:
       context: ./backend
+      target: runtime
     environment:
       APP_ENV: ${APP_ENV:-development}
       DEBUG: ${DEBUG:-true}
@@ -44,14 +53,16 @@ services:
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env (see .env.example)}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://localhost:5173}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-eitop}:${POSTGRES_PASSWORD:-eitop}@postgres:5432/${POSTGRES_DB:-eitop}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-eitop-dev-redis}@redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     ports:
-      - "8000:8000"
+      # Loopback only: direct container access must not bypass the nginx
+      # proxy (which sets the trusted X-Forwarded-For used by rate limiting).
+      - "127.0.0.1:8000:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
@@ -68,18 +79,49 @@ services:
   worker:
     build:
       context: ./backend
+      target: runtime
     command: ["celery", "-A", "app.core.celery_app:celery_app", "worker", "--loglevel=info"]
     environment:
       APP_ENV: ${APP_ENV:-development}
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env (see .env.example)}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-eitop}:${POSTGRES_PASSWORD:-eitop}@postgres:5432/${POSTGRES_DB:-eitop}
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://:${REDIS_PASSWORD:-eitop-dev-redis}@redis:6379/0
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
+    networks: [eitop]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  # Test/lint runner (dev image). Never started by `docker compose up`:
+  #   docker compose run --rm --entrypoint "" tester python -m pytest tests
+  tester:
+    build:
+      context: ./backend
+      target: dev
+    profiles: ["tools"]
+    environment:
+      APP_ENV: testing
+      SECRET_KEY: test-secret-key-not-for-production-use
+      DATABASE_URL: postgresql+psycopg://eitop:eitop@postgres:5432/eitop_test
+      TEST_DATABASE_URL: postgresql+psycopg://eitop:eitop@postgres:5432/eitop_test
+      REDIS_URL: redis://:eitop-dev-redis@redis:6379/1
+      TEST_REDIS_URL: redis://:eitop-dev-redis@redis:6379/1
+      RATE_LIMIT_LOGIN_PER_MINUTE: "100000"
+      RATE_LIMIT_REFRESH_PER_MINUTE: "100000"
+    volumes:
+      - ./backend/tests:/app/tests:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     networks: [eitop]
     security_opt:
       - no-new-privileges:true

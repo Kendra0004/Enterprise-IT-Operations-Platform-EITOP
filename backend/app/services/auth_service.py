@@ -1,5 +1,10 @@
 """Authentication service: login, refresh rotation, logout.
 
+Refresh token rules (transport):
+- Raw refresh tokens exist only in the HttpOnly ``eitop_refresh`` cookie and
+  in this process's response — never in a JSON body, never in localStorage.
+- Only the SHA-256 digest is stored server-side.
+
 Refresh token rotation rules:
 - Every refresh issues a new token and revokes the old one (replaced_by).
 - Presenting an already-revoked token revokes the whole family
@@ -20,6 +25,7 @@ from app.core.config import get_settings
 from app.core.exceptions import AppError
 from app.core.security import (
     create_access_token,
+    dummy_password_hash,
     generate_refresh_token,
     hash_password,
     sha256_hex,
@@ -63,15 +69,29 @@ def _record_audit(
 
 
 def authenticate_user(db: Session, email: str, password: str) -> User | None:
+    """Verify credentials with constant work regardless of account existence.
+
+    Unknown or inactive accounts still consume one full Argon2 verification
+    (against a dummy hash) so response timing cannot be used for account
+    enumeration.
+    """
     user = db.scalar(select(User).where(User.email == email.lower()))
     if user is None or not user.is_active:
+        verify_password(password, dummy_password_hash())
         return None
     if not verify_password(password, user.hashed_password):
         return None
     return user
 
 
-def _issue_tokens(db: Session, user: User, family_id: uuid.UUID) -> TokenResponse:
+def _issue_tokens(
+    db: Session, user: User, family_id: uuid.UUID
+) -> tuple[TokenResponse, str]:
+    """Create a new token pair. Returns ``(response, raw_refresh_token)``.
+
+    The raw refresh token is handed to the caller ONLY so it can be placed
+    in an HttpOnly cookie; it is never put in the response body.
+    """
     settings = get_settings()
     access, expires_in = create_access_token(user.id, user.email)
     raw_refresh, digest = generate_refresh_token()
@@ -84,17 +104,18 @@ def _issue_tokens(db: Session, user: User, family_id: uuid.UUID) -> TokenRespons
     )
     db.add(token_row)
     db.flush()
-    return TokenResponse(
+    response = TokenResponse(
         access_token=access,
         expires_in=expires_in,
-        refresh_token=raw_refresh,
         refresh_expires_in=int(refresh_exp.total_seconds()),
     )
+    return response, raw_refresh
 
 
 def login(
     db: Session, request: Request, email: str, password: str
-) -> TokenResponse:
+) -> tuple[TokenResponse, str]:
+    """Returns ``(token_response, raw_refresh_token)`` for cookie placement."""
     user = authenticate_user(db, email, password)
     if user is None:
         _record_audit(
@@ -113,7 +134,7 @@ def login(
             "Invalid credentials",
             "Email or password is incorrect.",
         )
-    tokens = _issue_tokens(db, user, family_id=uuid.uuid4())
+    tokens, raw_refresh = _issue_tokens(db, user, family_id=uuid.uuid4())
     _record_audit(
         db,
         event_type="auth.login.success",
@@ -121,16 +142,37 @@ def login(
         request=request,
         actor=user,
     )
-    return tokens
+    return tokens, raw_refresh
 
 
-def refresh(db: Session, request: Request, raw_token: str) -> TokenResponse:
+def refresh(
+    db: Session, request: Request, raw_token: str
+) -> tuple[TokenResponse, str]:
+    """Rotate the cookie-borne refresh token.
+
+    Returns ``(token_response, new_raw_refresh_token)``.
+    """
+    if not raw_token:
+        _record_audit(
+            db,
+            event_type="auth.refresh.failure",
+            outcome="failure",
+            request=request,
+            detail={"reason": "missing_cookie"},
+        )
+        db.commit()  # persist audit before rollback-on-raise
+        raise AppError(
+            status.HTTP_401_UNAUTHORIZED,
+            "Not authenticated",
+            "No refresh token cookie present.",
+        )
+
     digest = sha256_hex(raw_token)
     row = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == digest))
     if row is None:
         _record_audit(
             db,
-            event_type="auth.refresh.reuse",
+            event_type="auth.refresh.failure",
             outcome="failure",
             request=request,
             detail={"reason": "unknown_token"},
@@ -167,22 +209,47 @@ def refresh(db: Session, request: Request, raw_token: str) -> TokenResponse:
 
     if row.expires_at <= now:
         row.revoked_at = now
-        db.commit()  # persist revocation before rollback-on-raise
+        _record_audit(
+            db,
+            event_type="auth.refresh.failure",
+            outcome="failure",
+            request=request,
+            target=row.user_id.hex,
+            detail={"reason": "expired"},
+        )
+        db.commit()  # persist revocation + audit before rollback-on-raise
         raise AppError(
             status.HTTP_401_UNAUTHORIZED, "Token expired", "Refresh token expired."
         )
 
     user = db.get(User, row.user_id)
     if user is None or not user.is_active:
+        # Disabled/deleted account: kill the family and audit the attempt.
+        for sibling in db.scalars(
+            select(RefreshToken).where(
+                RefreshToken.family_id == row.family_id,
+                RefreshToken.revoked_at.is_(None),
+            )
+        ):
+            sibling.revoked_at = now
+        _record_audit(
+            db,
+            event_type="auth.refresh.failure",
+            outcome="failure",
+            request=request,
+            target=row.user_id.hex,
+            detail={"reason": "account_unavailable"},
+        )
+        db.commit()  # persist revocation + audit before rollback-on-raise
         raise AppError(
             status.HTTP_401_UNAUTHORIZED, "Invalid session", "Account unavailable."
         )
 
     # Rotate: revoke old, issue new in the same family.
-    tokens = _issue_tokens(db, user, family_id=row.family_id)
+    tokens, new_raw = _issue_tokens(db, user, family_id=row.family_id)
     new_row = db.scalar(
         select(RefreshToken).where(
-            RefreshToken.token_hash == sha256_hex(tokens.refresh_token)
+            RefreshToken.token_hash == sha256_hex(new_raw)
         )
     )
     row.revoked_at = now
@@ -194,13 +261,15 @@ def refresh(db: Session, request: Request, raw_token: str) -> TokenResponse:
         request=request,
         actor=user,
     )
-    return tokens
+    return tokens, new_raw
 
 
 def logout(db: Session, request: Request, raw_token: str, user: User | None) -> None:
     """Revoke the presented refresh token (and its family) if it exists."""
-    digest = sha256_hex(raw_token)
-    row = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == digest))
+    digest = sha256_hex(raw_token) if raw_token else None
+    row = None
+    if digest:
+        row = db.scalar(select(RefreshToken).where(RefreshToken.token_hash == digest))
     if row is not None and row.revoked_at is None:
         now = datetime.now(UTC)
         for sibling in db.scalars(

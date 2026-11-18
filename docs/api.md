@@ -40,10 +40,15 @@ spec: `GET /openapi.json`.
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/login` | — | Credentials → token pair (rate-limited) |
-| POST | `/refresh` | — | Rotate refresh token (rate-limited) |
-| POST | `/logout` | Bearer | Revoke refresh family → 204 |
+| POST | `/login` | — | Credentials → access token + HttpOnly refresh cookie (rate-limited) |
+| POST | `/refresh` | cookie | Rotate refresh cookie (rate-limited, no body) |
+| POST | `/logout` | Bearer + cookie | Revoke refresh family, clear cookie → 204 |
 | GET | `/me` | Bearer | Current user + roles + permissions |
+
+> The refresh token is **never** present in a response body — it travels
+> only in the `eitop_refresh` HttpOnly cookie (see
+> [authentication.md](authentication.md)). State-changing requests carry an
+> `Origin` header that must match `CORS_ORIGINS` or they are rejected 403.
 
 ### Administration (`/api/v1`)
 
@@ -59,6 +64,7 @@ spec: `GET /openapi.json`.
 ```bash
 TOKEN=$(curl -s -X POST localhost:8000/api/v1/auth/login \
   -H 'Content-Type: application/json' \
+  -H 'Origin: http://localhost:8080' \
   -d '{"email":"admin@example.com","password":"..."}' | jq -r .access_token)
 
 curl -s localhost:8000/api/v1/audit-logs \
