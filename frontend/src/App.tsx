@@ -1,0 +1,57 @@
+import { Navigate, Route, Routes } from "react-router-dom";
+import { ProtectedRoute } from "./auth/ProtectedRoute";
+import { AppLayout } from "./layout/AppLayout";
+import { DashboardPage } from "./pages/DashboardPage";
+import { LoginPage } from "./pages/LoginPage";
+import { UnderDevelopment } from "./pages/UnderDevelopment";
+
+export function App() {
+  return (
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route element={<ProtectedRoute />}>
+        <Route element={<AppLayout />}>
+          <Route path="/" element={<DashboardPage />} />
+          <Route
+            path="/endpoints"
+            element={<UnderDevelopment moduleName="Endpoints" />}
+          />
+          <Route
+            path="/active-directory"
+            element={<UnderDevelopment moduleName="Active Directory" />}
+          />
+          <Route
+            path="/security"
+            element={<UnderDevelopment moduleName="Security & Compliance" />}
+          />
+          <Route
+            path="/vulnerabilities"
+            element={<UnderDevelopment moduleName="Vulnerabilities" />}
+          />
+          <Route
+            path="/network"
+            element={<UnderDevelopment moduleName="Network" />}
+          />
+          <Route
+            path="/dns"
+            element={<UnderDevelopment moduleName="DNS Security" />}
+          />
+          <Route
+            path="/automation"
+            element={<UnderDevelopment moduleName="Automation" />}
+          />
+          <Route path="/assets" element={<UnderDevelopment moduleName="Assets" />} />
+          <Route
+            path="/reports"
+            element={<UnderDevelopment moduleName="Reports" />}
+          />
+          <Route
+            path="/admin"
+            element={<UnderDevelopment moduleName="Administration" />}
+          />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Route>
+      </Route>
+    </Routes>
+  );
+}

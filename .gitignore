@@ -1,0 +1,35 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Node
+node_modules/
+frontend/dist/
+*.local
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# Test artifacts
+test.db
+*.tsbuildinfo

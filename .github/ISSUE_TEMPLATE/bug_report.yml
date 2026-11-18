@@ -1,0 +1,25 @@
+name: Bug report
+description: Report a functional bug
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Expected vs actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Minimal steps, versions (backend/frontend/commit).
+    validations:
+      required: true
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security check
+      options:
+        - label: This does not contain credentials or security-sensitive details
+          required: true

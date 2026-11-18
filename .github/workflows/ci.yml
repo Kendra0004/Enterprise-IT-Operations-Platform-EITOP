@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: eitop
+          POSTGRES_PASSWORD: eitop
+          POSTGRES_DB: eitop_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U eitop"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      SECRET_KEY: ci-secret-key-not-for-production-0123456789
+      APP_ENV: testing
+      DATABASE_URL: postgresql+psycopg://eitop:eitop@localhost:5432/eitop_test
+      TEST_DATABASE_URL: postgresql+psycopg://eitop:eitop@localhost:5432/eitop_test
+      REDIS_URL: redis://localhost:6379/1
+      TEST_REDIS_URL: redis://localhost:6379/1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+        working-directory: backend
+      - name: Ruff
+        run: ruff check --no-cache app tests
+        working-directory: backend
+      - name: Mypy
+        run: mypy app
+        working-directory: backend
+        env:
+          MYPY_CACHE_DIR: /tmp/mypy-cache
+      - name: Pytest
+        run: pytest --cov=app --cov-report=term-missing
+        working-directory: backend
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        run: npm ci || npm install
+        working-directory: frontend
+      - name: Typecheck
+        run: npx tsc --noEmit
+        working-directory: frontend
+      - name: Test
+        run: npm test
+        working-directory: frontend
+      - name: Build
+        run: npm run build
+        working-directory: frontend
+      - name: Audit (high+)
+        run: npm audit --audit-level=high || true
+        working-directory: frontend
+
+  container-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -t eitop-backend:ci backend
+      - name: Trivy scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: eitop-backend:ci
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          ignore-unfixed: true

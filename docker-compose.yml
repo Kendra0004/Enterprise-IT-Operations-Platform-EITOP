@@ -1,0 +1,109 @@
+# EITOP development / demo stack.
+# PostgreSQL and Redis are INTERNAL ONLY — no host ports published.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-eitop}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-eitop}
+      POSTGRES_DB: ${POSTGRES_DB:-eitop}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-eitop}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [eitop]
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [eitop]
+    security_opt:
+      - no-new-privileges:true
+
+  backend:
+    build:
+      context: ./backend
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DEBUG: ${DEBUG:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env (see .env.example)}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://localhost:5173}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-eitop}:${POSTGRES_PASSWORD:-eitop}@postgres:5432/${POSTGRES_DB:-eitop}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks: [eitop]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  worker:
+    build:
+      context: ./backend
+    command: ["celery", "-A", "app.core.celery_app:celery_app", "worker", "--loglevel=info"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env (see .env.example)}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-eitop}:${POSTGRES_PASSWORD:-eitop}@postgres:5432/${POSTGRES_DB:-eitop}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [eitop]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "8080:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [eitop]
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  pgdata:
+  redisdata:
+
+networks:
+  eitop:
+    driver: bridge
