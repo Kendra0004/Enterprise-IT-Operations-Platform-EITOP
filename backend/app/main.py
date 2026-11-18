@@ -11,7 +11,7 @@ from starlette.responses import Response as StarletteResponse
 from app.api.health import router as health_router
 from app.api.v1 import api_router
 from app.core.config import get_settings
-from app.core.exceptions import PROBLEM_MEDIA_TYPE, register_exception_handlers
+from app.core.exceptions import PROBLEM_MEDIA_TYPE, problem, register_exception_handlers
 from app.core.logging import setup_logging
 
 API_V1_PREFIX = "/api/v1"
@@ -51,6 +51,46 @@ def _origin_check_middleware(app: FastAPI) -> None:
                     },
                     media_type=PROBLEM_MEDIA_TYPE,
                 )
+        return await call_next(request)
+
+
+# Path-prefix → maximum request body size in bytes. Checked before any
+# parsing so oversized payloads never reach a handler (413).
+_BODY_LIMITS: tuple[tuple[str, int], ...] = (
+    ("/api/v1/agent/inventory", 5 * 1024 * 1024),  # full package lists
+    ("/api/v1/agent/enroll", 16 * 1024),
+    ("/api/v1/agent/", 8 * 1024),  # heartbeat, rotate-credential
+    ("/api/v1/endpoints/", 256 * 1024),
+    ("/api/v1/", 64 * 1024),
+)
+
+
+def _body_size_middleware(app: FastAPI) -> None:
+    """Reject oversized request bodies (Content-Length based, 413)."""
+    limits = sorted(_BODY_LIMITS, key=lambda item: -len(item[0]))
+
+    @app.middleware("http")
+    async def check_body_size(
+        request: Request, call_next: RequestResponseEndpoint
+    ) -> StarletteResponse:
+        if request.method in ("POST", "PUT", "PATCH"):
+            raw_length = request.headers.get("content-length")
+            if raw_length is not None:
+                try:
+                    size = int(raw_length)
+                except ValueError:
+                    return problem(
+                        400, "Invalid request", "Malformed Content-Length header."
+                    )
+                for prefix, limit in limits:
+                    if request.url.path.startswith(prefix):
+                        if size > limit:
+                            return problem(
+                                413,
+                                "Payload too large",
+                                f"Request body exceeds {limit} bytes.",
+                            )
+                        break
         return await call_next(request)
 
 
@@ -114,6 +154,7 @@ def create_app() -> FastAPI:
 
     register_exception_handlers(app)
     _origin_check_middleware(app)
+    _body_size_middleware(app)
     _security_headers_middleware(app)
 
     app.include_router(health_router)

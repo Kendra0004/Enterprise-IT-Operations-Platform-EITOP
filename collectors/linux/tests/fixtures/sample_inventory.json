@@ -1,0 +1,58 @@
+{
+  "system": {
+    "hostname": "web01",
+    "fqdn": "web01.example.com",
+    "os": "linux",
+    "distribution": "ubuntu",
+    "distribution_version": "24.04",
+    "os_version": "Ubuntu 24.04.1 LTS",
+    "os_arch": "x86_64",
+    "kernel": "6.8.0-45-generic",
+    "uptime_seconds": 123456
+  },
+  "hardware": {
+    "manufacturer": "QEMU",
+    "model": "Standard PC (Q35 + ICH9, 2009)",
+    "serial_number": null,
+    "cpu_model": "Common KVM processor",
+    "cpu_cores": 4,
+    "memory_bytes": 8589934592,
+    "disk_bytes": 107374182400
+  },
+  "network": {
+    "interfaces": [
+      {
+        "name": "eth0",
+        "mac": "52:54:00:12:34:56",
+        "ipv4": ["192.0.2.10"],
+        "ipv6": ["2001:db8::10"],
+        "is_up": true
+      },
+      {
+        "name": "lo",
+        "mac": null,
+        "ipv4": ["127.0.0.1"],
+        "ipv6": ["::1"],
+        "is_up": true
+      }
+    ],
+    "ip_addresses": ["192.0.2.10", "2001:db8::10"],
+    "mac_addresses": ["52:54:00:12:34:56"]
+  },
+  "filesystems": [
+    {
+      "mount": "/",
+      "fstype": "ext4",
+      "total_bytes": 107374182400,
+      "used_bytes": 42949672960
+    }
+  ],
+  "packages": [
+    {"name": "curl", "version": "8.5.0-2ubuntu10", "package_manager": "dpkg"},
+    {"name": "openssl", "version": "3.0.13-0ubuntu3", "package_manager": "dpkg"}
+  ],
+  "facts": {
+    "collector.version": "0.1.0",
+    "collector.python": "3.12.3"
+  }
+}

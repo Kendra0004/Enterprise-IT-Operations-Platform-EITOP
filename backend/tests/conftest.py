@@ -28,6 +28,7 @@ os.environ["APP_ENV"] = "testing"
 # ceiling high here so the shared testclient IP does not trip it.
 os.environ["RATE_LIMIT_LOGIN_PER_MINUTE"] = "100000"
 os.environ["RATE_LIMIT_REFRESH_PER_MINUTE"] = "100000"
+os.environ["RATE_LIMIT_ENROLL_PER_MINUTE"] = "100000"
 
 
 
@@ -170,6 +171,28 @@ def agent_user(db):
     user = User(
         email=email,
         full_name="Test Agent",
+        hashed_password=hash_password("Str0ng!Passw0rd#2026"),
+        is_active=True,
+        roles=[role],
+    )
+    db.add(user)
+    db.commit()
+    return user
+
+
+@pytest.fixture()
+def operator_user(db):
+    from app.core.security import hash_password
+    from app.db.seed import seed_rbac
+    from app.models import Role, User
+    from sqlalchemy import select
+
+    seed_rbac()
+    email = f"operator-{uuid.uuid4().hex[:8]}@example.com"
+    role = db.scalar(select(Role).where(Role.name == "operator"))
+    user = User(
+        email=email,
+        full_name="Test Operator",
         hashed_password=hash_password("Str0ng!Passw0rd#2026"),
         is_active=True,
         roles=[role],

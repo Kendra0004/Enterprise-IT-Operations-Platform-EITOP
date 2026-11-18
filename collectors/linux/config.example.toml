@@ -1,0 +1,25 @@
+# EITOP Linux collector configuration example.
+# Copy to /etc/eitop/collector.toml (root-owned, mode 0600) and adjust.
+#
+# The enrollment token and agent credential are NEVER stored here:
+# - enrollment token: passed via EITOP_ENROLL_TOKEN env, stdin, or prompt
+# - agent credential: written to [collector].credential_file with mode 0600
+
+[collector]
+# EITOP server base URL (HTTPS required in production).
+server_url = "http://localhost:8080"
+
+# Full inventory submission interval (seconds). Minimum 10.
+interval_seconds = 300
+
+# Heartbeat interval (seconds). Minimum 10.
+heartbeat_interval_seconds = 60
+
+# Per-request timeout (seconds).
+timeout_seconds = 30
+
+# Retries per request on network errors / 5xx / 429 (exponential backoff).
+max_retries = 5
+
+# Where the endpoint credential is persisted (0600, owner-only).
+credential_file = "/var/lib/eitop/credentials.json"

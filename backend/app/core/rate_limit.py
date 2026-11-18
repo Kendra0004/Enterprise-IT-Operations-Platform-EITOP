@@ -71,9 +71,18 @@ def refresh_rate_limit(request: Request) -> None:
     )
 
 
+def enroll_rate_limit(request: Request) -> None:
+    """Throttle agent enrollment attempts (token guessing defense)."""
+    settings = get_settings()
+    RateLimiter("enroll", settings.rate_limit_enroll_per_minute).check(
+        client_ip(request)
+    )
+
+
 __all__ = [
     "RateLimiter",
     "client_ip",
+    "enroll_rate_limit",
     "login_rate_limit",
     "problem",
     "refresh_rate_limit",

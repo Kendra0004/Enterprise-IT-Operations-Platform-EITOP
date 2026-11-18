@@ -36,6 +36,7 @@ class Settings(BaseSettings):
 
     rate_limit_login_per_minute: int = Field(default=10, ge=1)
     rate_limit_refresh_per_minute: int = Field(default=30, ge=1)
+    rate_limit_enroll_per_minute: int = Field(default=10, ge=1)
 
     @field_validator("app_env")
     @classmethod

@@ -35,7 +35,10 @@ PERMISSIONS: dict[str, str] = {
 
 # Initial roles from the platform spec.
 ROLES: dict[str, tuple[str, list[str]]] = {
-    "admin": ("Full platform administrator", ["admin:read", "admin:write", "audit:read"]),
+    "admin": (
+        "Full platform administrator",
+        ["admin:read", "admin:write", "audit:read", "endpoints:read", "endpoints:write"],
+    ),
     "security_auditor": (
         "Read-only security and audit access",
         [
@@ -95,15 +98,22 @@ def seed_rbac() -> None:
             p.name: p for p in db.scalars(select(Permission)).all()
         }
 
-        existing_roles = {r.name for r in db.scalars(select(Role)).all()}
+        existing_roles = {r.name: r for r in db.scalars(select(Role)).all()}
         for name, (desc, perm_names) in ROLES.items():
-            if name in existing_roles:
-                continue
-            role = Role(name=name, description=desc)
-            role.permissions = [
-                perm_by_name[pn] for pn in perm_names if pn in perm_by_name
-            ]
-            db.add(role)
+            role = existing_roles.get(name)
+            if role is None:
+                role = Role(name=name, description=desc)
+                role.permissions = [
+                    perm_by_name[pn] for pn in perm_names if pn in perm_by_name
+                ]
+                db.add(role)
+            else:
+                # Additive sync: grant newly catalogued permissions to roles
+                # that already exist (never removes existing grants).
+                current = {p.name for p in role.permissions}
+                for pn in perm_names:
+                    if pn not in current and pn in perm_by_name:
+                        role.permissions.append(perm_by_name[pn])
 
         db.commit()
         logger.info("rbac_seeded", extra={"roles": sorted(ROLES)})
