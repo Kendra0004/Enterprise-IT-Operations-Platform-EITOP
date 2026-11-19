@@ -50,6 +50,23 @@ spec: `GET /openapi.json`.
 > [authentication.md](authentication.md)). State-changing requests carry an
 > `Origin` header that must match `CORS_ORIGINS` or they are rejected 403.
 
+### Endpoint management (Phase 2)
+
+Full reference: [endpoints/api.md](endpoints/api.md).
+
+| Method | Path | Permission |
+|---|---|---|
+| GET | `/endpoints?page=&page_size=&status=&group_id=&q=&os=&agent_version=&heartbeat_from=&heartbeat_to=&sort=&order=` | `endpoints:read` |
+| GET | `/endpoints/overview` | `endpoints:read` |
+| GET | `/endpoints/{id}` · `/health` · `/snapshots` · `/snapshots/{sid}` · `/software` · `/network` | `endpoints:read` |
+| POST | `/endpoints/{id}/revoke` · `/rotate-credential` | `endpoints:write` |
+| GET/POST | `/endpoints/groups` · GET `/endpoints/groups/{gid}` | read / write |
+| POST/DELETE | `/endpoints/{id}/groups/{gid}` (assign/remove) | `endpoints:write` |
+| POST | `/agent/enroll` · `/agent/heartbeat` · `/agent/inventory` · `/agent/rotate-credential` | endpoint credential |
+
+`status` accepts `active` \| `offline` \| `revoked`; history routes accept
+`from`/`to` bounded to 366 days; `page_size` ≤ 100.
+
 ### Administration (`/api/v1`)
 
 | Method | Path | Permission |

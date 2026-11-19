@@ -67,6 +67,8 @@ class EndpointOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     groups: list[str] = Field(default_factory=list)
+    # Reported IPs from the last inventory (empty when none reported).
+    ip_addresses: list[str] = Field(default_factory=list)
 
 
 class EndpointDetailOut(EndpointOut):
@@ -76,6 +78,109 @@ class EndpointDetailOut(EndpointOut):
     metadata: MetadataOut | None = None
     facts: list[FactOut] = Field(default_factory=list)
     software_count: int = 0
+    last_inventory_at: datetime | None = None
+
+
+# --- Health (Phase 2.5) -----------------------------------------------------
+
+
+class EndpointHealthOut(BaseModel):
+    """Health snapshot for one endpoint. Read-time derived values are
+    computed from UTC timestamps even between background scans."""
+
+    endpoint_id: uuid.UUID
+    status: str  # persisted lifecycle: active | offline | revoked
+    collector_status: str  # derived: healthy | late | offline | pending | revoked
+    last_heartbeat_at: datetime | None = None
+    last_inventory_at: datetime | None = None
+    seconds_since_heartbeat: int | None = None
+    agent_version: str | None = None
+    heartbeat_interval_seconds: int
+    offline_threshold_seconds: int
+    server_time: datetime
+
+
+class OverviewStatsOut(BaseModel):
+    """Aggregate counters for the endpoint overview page (real data only)."""
+
+    total: int
+    active: int
+    offline: int
+    revoked: int
+    windows: int
+    linux: int
+    other_os: int
+    latest_enrollments: list[EndpointOut] = Field(default_factory=list)
+
+
+# --- Inventory snapshots (Phase 2.6) ---------------------------------------
+
+
+class SnapshotOut(BaseModel):
+    """Snapshot list row — summary only, no full payload."""
+
+    id: uuid.UUID
+    endpoint_id: uuid.UUID
+    collected_at: datetime
+    received_at: datetime
+    agent_version: str | None = None
+    schema_version: int
+    package_count: int = 0
+    fact_count: int = 0
+    has_hardware: bool = False
+    has_network: bool = False
+
+
+class SnapshotSoftwareOut(BaseModel):
+    name: str
+    version: str
+    package_manager: str
+    previous_version: str | None = None  # set on changed_packages diffs
+
+
+class HardwareChangeOut(BaseModel):
+    field: str
+    before: object = None
+    after: object = None
+
+
+class SnapshotDiffOut(BaseModel):
+    """Comparison of two snapshots of the SAME endpoint (compare_to → id)."""
+
+    base_snapshot_id: uuid.UUID
+    target_snapshot_id: uuid.UUID
+    added_packages: list[SnapshotSoftwareOut] = Field(default_factory=list)
+    removed_packages: list[SnapshotSoftwareOut] = Field(default_factory=list)
+    changed_packages: list[SnapshotSoftwareOut] = Field(default_factory=list)
+    hardware_changes: list[HardwareChangeOut] = Field(default_factory=list)
+
+
+class SnapshotDetailOut(SnapshotOut):
+    system: dict
+    hardware: dict | None = None
+    network: dict | None = None
+    filesystems: list[dict] = Field(default_factory=list)
+    facts: dict[str, str] = Field(default_factory=dict)
+    packages: list[SnapshotSoftwareOut] = Field(default_factory=list)
+    changes: SnapshotDiffOut | None = None  # present only with compare_to
+
+
+class SoftwareHistoryOut(BaseModel):
+    """One package row as seen in one snapshot (view=history)."""
+
+    snapshot_id: uuid.UUID
+    collected_at: datetime
+    name: str
+    version: str
+    package_manager: str
+
+
+class NetworkHistoryOut(BaseModel):
+    """Network state as reported by one snapshot."""
+
+    snapshot_id: uuid.UUID
+    collected_at: datetime
+    network: dict | None = None
 
 
 # --- Administrator schemas --------------------------------------------------
@@ -135,6 +240,12 @@ class GroupOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     endpoint_count: int = 0
+
+
+class GroupDetailOut(GroupOut):
+    """Group with its member endpoints (group details page)."""
+
+    members: list[EndpointOut] = Field(default_factory=list)
 
 
 class EndpointRevokeOut(BaseModel):
@@ -258,6 +369,10 @@ class AgentInventoryRequest(BaseModel):
     filesystems: list[FilesystemReport] = Field(default_factory=list, max_length=64)
     packages: list[PackageReport] = Field(default_factory=list, max_length=20000)
     facts: dict[str, str] = Field(default_factory=dict, max_length=512)
+    # Optional history metadata (Phase 2.6). Backward compatible: existing
+    # collectors omit both and receive server-side defaults.
+    schema_version: int = Field(default=1, ge=1, le=1000)
+    collected_at: datetime | None = None  # agent-side UTC collection time
 
     @field_validator("facts")
     @classmethod
@@ -286,5 +401,11 @@ class AgentCredentialRotateOut(BaseModel):
 
 
 SortField = Literal[
-    "hostname", "status", "enrolled_at", "last_heartbeat_at", "created_at"
+    "hostname",
+    "status",
+    "os",
+    "agent_version",
+    "enrolled_at",
+    "last_heartbeat_at",
+    "created_at",
 ]

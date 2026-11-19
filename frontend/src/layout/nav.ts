@@ -8,6 +8,7 @@ export interface NavItem {
 export const NAV_ITEMS: NavItem[] = [
   { label: "Dashboard", path: "/" },
   { label: "Endpoints", path: "/endpoints", permission: "endpoints:read" },
+  { label: "Groups", path: "/groups", permission: "endpoints:read" },
   { label: "Active Directory", path: "/active-directory", permission: "endpoints:read" },
   { label: "Security & Compliance", path: "/security", permission: "security:read" },
   { label: "Vulnerabilities", path: "/vulnerabilities", permission: "vulns:read" },

@@ -38,12 +38,40 @@ class Settings(BaseSettings):
     rate_limit_refresh_per_minute: int = Field(default=30, ge=1)
     rate_limit_enroll_per_minute: int = Field(default=10, ge=1)
 
+    # --- Endpoint health (Phase 2.5) ---------------------------------------
+    # Expected agent heartbeat cadence (informational: health display and
+    # the "late" warning band).
+    endpoint_heartbeat_interval_seconds: int = Field(default=300, ge=10)
+    # An endpoint is marked offline when its last heartbeat is older than
+    # this. Must be >= the expected interval so normal jitter never flips
+    # an endpoint offline.
+    endpoint_offline_threshold_seconds: int = Field(default=900, ge=10)
+    # Celery scan cadence for the offline transition (recovery happens
+    # synchronously on the next valid heartbeat).
+    endpoint_health_scan_seconds: int = Field(default=60, ge=10)
+
+    # --- Inventory snapshot retention (Phase 2.6) ---------------------------
+    # Days to keep inventory snapshots. None (default) = keep forever:
+    # retention never deletes history unless an operator opts in.
+    snapshot_retention_days: int | None = Field(default=None, ge=1)
+
     @field_validator("app_env")
     @classmethod
     def _known_env(cls, v: str) -> str:
         allowed = {"development", "testing", "production"}
         if v not in allowed:
             raise ValueError(f"APP_ENV must be one of {sorted(allowed)}")
+        return v
+
+    @field_validator("endpoint_offline_threshold_seconds")
+    @classmethod
+    def _threshold_ge_interval(cls, v: int, info) -> int:  # type: ignore[no-untyped-def]
+        interval = info.data.get("endpoint_heartbeat_interval_seconds", 300)
+        if v < interval:
+            raise ValueError(
+                "endpoint_offline_threshold_seconds must be >= "
+                "endpoint_heartbeat_interval_seconds"
+            )
         return v
 
     @property

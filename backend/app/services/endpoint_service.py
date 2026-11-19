@@ -21,19 +21,24 @@ from datetime import UTC, datetime, timedelta
 from typing import NoReturn, cast
 
 from fastapi import Request, status
-from sqlalchemy import delete, select, update
+from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.exceptions import AppError
 from app.core.security import sha256_hex
 from app.models import (
     ENDPOINT_ACTIVE,
+    ENDPOINT_OFFLINE,
     ENDPOINT_REVOKED,
     Endpoint,
     EndpointCredential,
     EndpointFact,
     EndpointGroup,
     EndpointMetadata,
+    EndpointSnapshot,
+    EndpointSnapshotSoftware,
     EndpointSoftware,
     EnrollmentToken,
     User,
@@ -271,7 +276,10 @@ def authenticate_agent(
         endpoint = db.get(Endpoint, cred.endpoint_id)
         if endpoint is None:
             reason = "endpoint_missing"
-        elif endpoint.status != ENDPOINT_ACTIVE:
+        elif endpoint.status == ENDPOINT_REVOKED:
+            # Only revocation is terminal. "offline" endpoints keep working
+            # credentials so a returning agent can heartbeat back to active —
+            # missing heartbeats must never be confused with revocation.
             reason = "endpoint_revoked"
 
     if reason is not None:
@@ -373,10 +381,13 @@ def revoke_endpoint(
 def apply_inventory(
     db: Session, endpoint: Endpoint, payload: AgentInventoryRequest
 ) -> dict[str, int]:
-    """Upsert an inventory submission for the authenticated endpoint.
+    """Upsert current inventory state AND append an immutable snapshot.
 
-    Idempotent: repeating the same payload produces the same row counts
-    (facts and packages are keyed uniquely per endpoint).
+    Idempotent on both layers:
+    - current state: facts/packages keyed uniquely per endpoint;
+    - history: snapshot insert is ``ON CONFLICT (endpoint_id, content_hash)
+      DO NOTHING`` — an identical resubmission (network retry) never creates
+      a duplicate snapshot.
     """
     now = datetime.now(UTC)
     system = payload.system
@@ -504,19 +515,211 @@ def apply_inventory(
             )
         )
 
+    # --- Immutable history layer (Phase 2.6) -------------------------------
+    endpoint.last_inventory_at = now
+    snapshot_created = _append_snapshot(db, endpoint, payload, received_at=now)
+
     return {
         "facts": fact_count,
         "packages": package_count,
         "interfaces": len(net.interfaces) if net else 0,
+        "snapshots": 1 if snapshot_created else 0,
     }
+
+
+def _canonical_payload_hash(payload: AgentInventoryRequest) -> str:
+    """Deterministic digest of the full submission (sorted keys, compact)."""
+    canonical = json.dumps(
+        payload.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+    )
+    return sha256_hex(canonical)
+
+
+def _utc_normalized(value: datetime | None, fallback: datetime) -> datetime:
+    """Agent timestamps are UTC; a naive datetime is assumed UTC."""
+    if value is None:
+        return fallback
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _append_snapshot(
+    db: Session,
+    endpoint: Endpoint,
+    payload: AgentInventoryRequest,
+    *,
+    received_at: datetime,
+) -> bool:
+    """Append an immutable snapshot for this submission.
+
+    Returns True when a new snapshot row was created, False for an exact
+    duplicate (content hash already stored for this endpoint). Packages are
+    written to the normalized table only for a NEW snapshot — never twice.
+    """
+    content_hash = _canonical_payload_hash(payload)
+    result = db.execute(
+        pg_insert(EndpointSnapshot)
+        .values(
+            endpoint_id=endpoint.id,
+            collected_at=_utc_normalized(payload.collected_at, received_at),
+            received_at=received_at,
+            agent_version=endpoint.agent_version,
+            schema_version=payload.schema_version,
+            content_hash=content_hash,
+            system=payload.system.model_dump(mode="json"),
+            hardware=(
+                payload.hardware.model_dump(mode="json") if payload.hardware else None
+            ),
+            network=(
+                payload.network.model_dump(mode="json") if payload.network else None
+            ),
+            filesystems=[fs.model_dump(mode="json") for fs in payload.filesystems],
+            facts=dict(payload.facts),
+        )
+        .on_conflict_do_nothing(index_elements=["endpoint_id", "content_hash"])
+        .returning(EndpointSnapshot.id)
+    )
+    snapshot_id = result.scalar_one_or_none()
+    if snapshot_id is None:
+        return False  # identical submission already snapshotted
+
+    # Normalize packages once (dedupe by name+manager, last write wins).
+    packages = {
+        (p.name, p.package_manager): p for p in payload.packages
+    }
+    if packages:
+        db.execute(
+            pg_insert(EndpointSnapshotSoftware),
+            [
+                {
+                    "snapshot_id": snapshot_id,
+                    "name": name,
+                    "package_manager": manager,
+                    "version": pkg.version,
+                }
+                for (name, manager), pkg in sorted(packages.items())
+            ],
+        )
+    return True
 
 
 def record_heartbeat(
     db: Session, endpoint: Endpoint, agent_version: str | None
 ) -> None:
-    endpoint.last_heartbeat_at = datetime.now(UTC)
+    """Record a valid heartbeat and recover an offline endpoint.
+
+    Audit is written ONLY on the offline→active transition — routine
+    heartbeats are not security/lifecycle events and are never audited.
+    Revoked endpoints never reach this function (authentication rejects
+    them); the status guard below is defense in depth.
+    """
+    now = datetime.now(UTC)
+    endpoint.last_heartbeat_at = now
     if agent_version:
         endpoint.agent_version = agent_version
+    if endpoint.status == ENDPOINT_OFFLINE:
+        # Recovery: a valid heartbeat is proof of life. Conditional update
+        # guards against a concurrent scan/revocation racing this request.
+        recovered = db.execute(
+            update(Endpoint)
+            .where(Endpoint.id == endpoint.id, Endpoint.status == ENDPOINT_OFFLINE)
+            .values(status=ENDPOINT_ACTIVE, updated_at=now)
+        )
+        if getattr(recovered, "rowcount", 0):
+            endpoint.status = ENDPOINT_ACTIVE
+            _record_audit(
+                db,
+                event_type="endpoint.online",
+                outcome="success",
+                actor_email="agent",
+                target=str(endpoint.id),
+                detail={"hostname": endpoint.hostname, "agent_version": agent_version},
+            )
+
+
+def derive_collector_status(
+    endpoint: Endpoint, now: datetime, *, interval: int, threshold: int
+) -> tuple[str, int | None]:
+    """Read-time health derivation: (collector_status, seconds_since_heartbeat).
+
+    ``collector_status`` is computed from UTC timestamps so health stays
+    accurate between background scans:
+    - revoked      → terminal, always (never derived from missing beats)
+    - pending      → enrolled, never heartbeated, still inside the grace window
+    - offline      → past the threshold (or scan already flipped the column)
+    - late         → heartbeat older than the expected interval
+    - healthy      → heartbeat within the expected interval
+    Missing heartbeat is never reported as "revoked".
+    """
+
+    def _age(moment: datetime | None) -> int | None:
+        if moment is None:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC)
+        return max(0, int((now - moment).total_seconds()))
+
+    if endpoint.status == ENDPOINT_REVOKED:
+        return "revoked", _age(endpoint.last_heartbeat_at)
+
+    age = _age(endpoint.last_heartbeat_at)
+    if age is None:
+        # Never heartbeated: grace measured from enrollment.
+        enrolled_age = _age(endpoint.enrolled_at) or 0
+        if endpoint.status == ENDPOINT_OFFLINE or enrolled_age >= threshold:
+            return "offline", None
+        return "pending", None
+    if endpoint.status == ENDPOINT_OFFLINE or age > threshold:
+        return "offline", age
+    if age > interval:
+        return "late", age
+    return "healthy", age
+
+
+def scan_offline_endpoints(db: Session) -> int:
+    """Mark active endpoints whose last heartbeat exceeds the threshold as
+    offline. Returns the number of status transitions.
+
+    Called ONLY from the Celery periodic task — never from a request
+    handler (no database polling inside FastAPI). The conditional UPDATE
+    (status='active' AND stale heartbeat) makes the transition atomic:
+    concurrent runs or a just-arrived heartbeat cause rowcount 0, so the
+    same endpoint is never transitioned (and audited) twice.
+    """
+    settings = get_settings()
+    cutoff = datetime.now(UTC) - timedelta(
+        seconds=settings.endpoint_offline_threshold_seconds
+    )
+    # Never-heartbeated endpoints age from enrollment; a fresh enrollment
+    # inside the grace window stays active.
+    stale = or_(
+        Endpoint.last_heartbeat_at < cutoff,
+        and_(
+            Endpoint.last_heartbeat_at.is_(None),
+            Endpoint.enrolled_at < cutoff,
+        ),
+    )
+    result = db.execute(
+        update(Endpoint)
+        .where(Endpoint.status == ENDPOINT_ACTIVE, stale)
+        .values(status=ENDPOINT_OFFLINE, updated_at=datetime.now(UTC))
+        .returning(Endpoint.id, Endpoint.hostname)
+    )
+    rows = result.all()
+    for row in rows:
+        _record_audit(
+            db,
+            event_type="endpoint.offline",
+            outcome="success",
+            actor_email="system",
+            target=str(row.id),
+            detail={
+                "hostname": row.hostname,
+                "threshold_seconds": settings.endpoint_offline_threshold_seconds,
+            },
+        )
+    return len(rows)
 
 
 def _json_compact(value: object) -> str:

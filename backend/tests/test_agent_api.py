@@ -210,7 +210,13 @@ def test_inventory_is_idempotent(client, auth_headers):
         "/api/v1/agent/inventory", headers=headers, json=_inventory("idem-host")
     )
     assert second.status_code == 200
-    assert first.json()["counts"] == second.json()["counts"]
+    first_counts = first.json()["counts"]
+    second_counts = second.json()["counts"]
+    # the history layer intentionally differs: 1 new snapshot first time,
+    # 0 on an identical resubmission (content-hash dedupe)
+    assert first_counts.pop("snapshots") == 1
+    assert second_counts.pop("snapshots") == 0
+    assert first_counts == second_counts
 
     detail = client.get(
         f"/api/v1/endpoints/{endpoint_id}", headers=auth_headers

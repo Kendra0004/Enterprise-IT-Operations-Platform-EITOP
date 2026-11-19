@@ -1,14 +1,21 @@
-"""Endpoint inventory, grouping, enrollment and agent credential models (Phase 2).
+"""Endpoint inventory, grouping, enrollment, agent credential and snapshot models (Phase 2).
 
-Design notes for later milestones (2.4–2.7):
+Design notes:
 - ``EndpointMetadata`` is 1:1 hardware/network identity (upserted, never
-  duplicated per submission).
+  duplicated per submission) — this is the "current state" layer.
 - ``EndpointFact`` is an extensible key/value store for inventory attributes
-  that do not deserve a column yet (uptime, filesystem usage, distribution, …).
+  that do not deserve a column yet (uptime, filesystem usage, distribution).
 - ``EndpointSoftware`` holds package rows keyed uniquely per endpoint so
-  repeated submissions update instead of duplicating (2.4 reporting reads it).
-- Historical snapshots (2.7) can reference these tables without schema
-  changes.
+  repeated submissions update instead of duplicating rows — current software
+  state for fast detail reads.
+- ``EndpointSnapshot`` (Phase 2.6) is the immutable history layer: one row
+  per DISTINCT inventory submission (content-hash deduplicated) storing the
+  report sections as JSONB. Packages are NOT duplicated inside the JSONB —
+  they live in normalized ``endpoint_snapshot_software`` rows keyed by
+  (snapshot, name, manager) so software history stays SQL-queryable without
+  storing the package list twice.
+- Current-state tables are overwritten in place; snapshots are never mutated
+  after insert (append-only history).
 """
 
 from __future__ import annotations
@@ -23,24 +30,31 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Table,
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 
 # Endpoint lifecycle states (CHECK-constrained in the database).
 ENDPOINT_ACTIVE = "active"
+ENDPOINT_OFFLINE = "offline"
 ENDPOINT_REVOKED = "revoked"
-ENDPOINT_STATUSES = (ENDPOINT_ACTIVE, ENDPOINT_REVOKED)
+ENDPOINT_STATUSES = (ENDPOINT_ACTIVE, ENDPOINT_OFFLINE, ENDPOINT_REVOKED)
 
 # Audit/agent action sources for facts.
 SOURCE_COLLECTOR = "collector"
 SOURCE_MANUAL = "manual"
+
+# Inventory payload schema version recorded on every snapshot. Bumped only on
+# incompatible report-shape changes; agents may send their own value.
+INVENTORY_SCHEMA_VERSION = 1
 
 
 def _uuid_pk() -> Mapped[uuid.UUID]:
@@ -97,7 +111,8 @@ class Endpoint(Base):
     __tablename__ = "endpoints"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('active', 'revoked')", name="ck_endpoints_status"
+            "status IN ('active', 'offline', 'revoked')",
+            name="ck_endpoints_status",
         ),
     )
 
@@ -115,6 +130,11 @@ class Endpoint(Base):
     )
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), index=True
+    )
+    # Timestamp of the most recent accepted inventory submission (nullable:
+    # an endpoint may heartbeat before its first inventory arrives).
+    last_inventory_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -273,3 +293,78 @@ class EndpointCredential(Base):
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     endpoint: Mapped[Endpoint] = relationship(back_populates="credentials")
+
+
+class EndpointSnapshot(Base):
+    """Immutable inventory history row (Phase 2.6).
+
+    One row per distinct inventory submission, identified by
+    ``(endpoint_id, content_hash)`` — an identical resubmission (network
+    retry, collector rerun with no state change) does NOT create a second
+    snapshot. Rows are never updated or deleted by application code
+    (retention pruning is an explicit, off-by-default background job).
+
+    The payload sections are stored as JSONB for exact historical fidelity;
+    packages are normalized into ``endpoint_snapshot_software`` instead of
+    being duplicated here (see module docstring).
+    """
+
+    __tablename__ = "endpoint_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "endpoint_id",
+            "content_hash",
+            name="uq_endpoint_snapshots_endpoint_content",
+        ),
+        # List/history queries are always endpoint-scoped and time-ordered.
+        Index("ix_endpoint_snapshots_endpoint_received", "endpoint_id", "received_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    endpoint_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("endpoints.id", ondelete="CASCADE"), index=True
+    )
+    # Agent-side collection time when supplied; falls back to received_at
+    # (current collectors do not send one — documented behavior).
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, index=True
+    )
+    agent_version: Mapped[str | None] = mapped_column(String(32))
+    schema_version: Mapped[int] = mapped_column(Integer, default=INVENTORY_SCHEMA_VERSION)
+    content_hash: Mapped[str] = mapped_column(String(64))
+
+    # Report sections (exact historical copy; null = not reported).
+    # JSONB sections; absent optional sections are stored as SQL NULL
+    # (none_as_null) so "no hardware reported" is distinguishable in SQL.
+    system: Mapped[dict] = mapped_column(JSONB)
+    hardware: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    network: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True))
+    filesystems: Mapped[list] = mapped_column(JSONB, default=list)
+    facts: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+    endpoint: Mapped[Endpoint] = relationship()
+
+
+class EndpointSnapshotSoftware(Base):
+    """Normalized package row for one snapshot.
+
+    Composite primary key (snapshot_id, name, package_manager) makes package
+    insertion idempotent by construction and keeps a single copy of each
+    package list (the snapshot JSONB deliberately excludes it).
+    """
+
+    __tablename__ = "endpoint_snapshot_software"
+
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("endpoint_snapshots.id", ondelete="CASCADE"), primary_key=True
+    )
+    name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    package_manager: Mapped[str] = mapped_column(String(32), primary_key=True)
+    version: Mapped[str] = mapped_column(String(128), default="")
+
+    __table_args__ = (
+        # Supports "history of package X across snapshots" without scanning
+        # by snapshot first.
+        Index("ix_endpoint_snapshot_software_name", "name"),
+    )

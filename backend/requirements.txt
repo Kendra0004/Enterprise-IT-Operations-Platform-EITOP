@@ -9,7 +9,11 @@ email-validator>=2.2,<3.0
 sqlalchemy>=2.0.35,<2.1
 alembic>=1.13,<2.0
 psycopg[binary]>=3.2,<4.0
-redis>=5.0,<6.0
+# kombu 5.7's Redis transport requires redis-py >= 6.1
+redis>=6.1,<7.0
 celery>=5.4,<6.0
+# kombu's Redis transport imports packaging at runtime (celery dependency
+# gap) — required for the worker/beat to start.
+packaging>=24.0,<26.0
 argon2-cffi>=23.1,<26.0
 pyjwt>=2.9,<3.0

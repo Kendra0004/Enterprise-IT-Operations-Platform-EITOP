@@ -1,8 +1,8 @@
-"""Celery application for background jobs (phase 1: configuration only).
+"""Celery application for background jobs.
 
-Jobs (inventory collection, CVE sync, SNMP polling) are added in later
-phases; this module establishes the shared Celery app so worker processes
-and the API agree on broker/serialization settings.
+Tasks live in ``app.tasks.jobs``; this module defines the shared app so
+worker, beat and the API agree on broker/serialization settings and the
+periodic schedule (Phase 2.5/2.6: offline detection, snapshot retention).
 """
 
 from __future__ import annotations
@@ -30,4 +30,16 @@ celery_app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,  # fair scheduling for long-running jobs
     result_expires=3600 * 24,
+    # Periodic jobs (Phase 2.5/2.6): offline detection runs continuously;
+    # snapshot retention is a daily no-op unless explicitly configured.
+    beat_schedule={
+        "scan-endpoint-offline": {
+            "task": "eitop.scan_endpoint_offline",
+            "schedule": float(settings.endpoint_health_scan_seconds),
+        },
+        "prune-endpoint-snapshots": {
+            "task": "eitop.prune_endpoint_snapshots",
+            "schedule": 60.0 * 60.0 * 24.0,  # daily
+        },
+    },
 )

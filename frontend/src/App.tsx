@@ -2,6 +2,10 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { ProtectedRoute } from "./auth/ProtectedRoute";
 import { AppLayout } from "./layout/AppLayout";
 import { DashboardPage } from "./pages/DashboardPage";
+import { EndpointDetailPage } from "./pages/EndpointDetailPage";
+import { EndpointHistoryPage } from "./pages/EndpointHistoryPage";
+import { EndpointListPage } from "./pages/EndpointListPage";
+import { GroupsPage } from "./pages/GroupsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { UnderDevelopment } from "./pages/UnderDevelopment";
 
@@ -12,10 +16,10 @@ export function App() {
       <Route element={<ProtectedRoute />}>
         <Route element={<AppLayout />}>
           <Route path="/" element={<DashboardPage />} />
-          <Route
-            path="/endpoints"
-            element={<UnderDevelopment moduleName="Endpoints" />}
-          />
+          <Route path="/endpoints" element={<EndpointListPage />} />
+          <Route path="/endpoints/:id" element={<EndpointDetailPage />} />
+          <Route path="/endpoints/:id/history" element={<EndpointHistoryPage />} />
+          <Route path="/groups" element={<GroupsPage />} />
           <Route
             path="/active-directory"
             element={<UnderDevelopment moduleName="Active Directory" />}

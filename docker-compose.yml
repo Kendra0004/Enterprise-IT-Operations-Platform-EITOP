@@ -99,6 +99,33 @@ services:
     tmpfs:
       - /tmp
 
+  # Scheduler for periodic jobs (offline detection, snapshot retention).
+  # Kept separate from the worker so task execution and scheduling can be
+  # scaled/observed independently.
+  beat:
+    build:
+      context: ./backend
+      target: runtime
+    # Schedule file lives on tmpfs: the container root filesystem is read-only.
+    command: ["celery", "-A", "app.core.celery_app:celery_app", "beat", "--loglevel=info", "--schedule", "/tmp/celerybeat-schedule"]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      SECRET_KEY: ${SECRET_KEY:?SECRET_KEY must be set in .env (see .env.example)}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-eitop}:${POSTGRES_PASSWORD:-eitop}@postgres:5432/${POSTGRES_DB:-eitop}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-eitop-dev-redis}@redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [eitop]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+
   # Test/lint runner (dev image). Never started by `docker compose up`:
   #   docker compose run --rm --entrypoint "" tester python -m pytest tests
   tester:

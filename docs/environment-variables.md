@@ -32,6 +32,18 @@ All configuration is environment-driven. Copy `.env.example` → `.env`.
 | `TEST_DATABASE_URL` | `.../eitop_test` | Test suite target DB |
 | `TEST_REDIS_URL` | `redis://localhost:6379/1` | Test suite target Redis DB |
 
+## Endpoint monitoring & history (Phase 2.5–2.6)
+
+| Variable | Default | Description |
+|---|---|---|
+| `ENDPOINT_HEARTBEAT_INTERVAL_SECONDS` | `300` | Expected agent heartbeat cadence (min 10) — drives the `late` health band |
+| `ENDPOINT_OFFLINE_THRESHOLD_SECONDS` | `900` | Heartbeat age after which an active endpoint is marked offline; must be ≥ the interval (validator) |
+| `ENDPOINT_HEALTH_SCAN_SECONDS` | `60` | Celery beat cadence for the offline-detection task |
+| `SNAPSHOT_RETENTION_DAYS` | *(unset)* | Days to keep inventory snapshots. Unset = keep forever (prune task no-ops) |
+
+See [endpoints/heartbeat.md](endpoints/heartbeat.md) and
+[endpoints/inventory-history.md](endpoints/inventory-history.md).
+
 ## Bootstrap (optional)
 
 | Variable | Description |
