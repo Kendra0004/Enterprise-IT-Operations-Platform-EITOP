@@ -12,7 +12,7 @@ export function ProtectedRoute() {
         role="status"
         aria-label="Loading session"
       >
-        <span className="animate-pulse text-slate-400">Restoring session…</span>
+        <span className="animate-pulse text-muted">Restoring session…</span>
       </div>
     );
   }

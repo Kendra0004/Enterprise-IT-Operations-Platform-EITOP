@@ -24,23 +24,26 @@ export function Pagination({
   const from = total === 0 ? 0 : (page - 1) * pageSize + 1;
   const to = Math.min(total, page * pageSize);
 
+  const buttonCls =
+    "rounded-md border border-line px-2.5 py-1 text-muted transition-colors hover:bg-raised hover:text-ink disabled:cursor-not-allowed disabled:opacity-40";
+
   return (
     <nav
       aria-label={label}
-      className="flex flex-wrap items-center justify-between gap-3 text-sm text-slate-400"
+      className="flex flex-wrap items-center justify-between gap-3 text-sm text-muted"
     >
-      <p aria-live="polite">
+      <p aria-live="polite" className="text-faint">
         {from}–{to} of {total}
       </p>
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         {onPageSizeChange && (
-          <label className="flex items-center gap-1">
-            <span className="text-slate-500">Per page</span>
+          <label className="flex items-center gap-1 text-faint">
+            Per page
             <select
               aria-label="Rows per page"
               value={pageSize}
               onChange={(e) => onPageSizeChange(Number(e.target.value))}
-              className="rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-slate-200"
+              className="rounded-md border border-line bg-surface px-1.5 py-1 text-ink"
             >
               {pageSizeOptions.map((n) => (
                 <option key={n} value={n}>
@@ -54,18 +57,18 @@ export function Pagination({
           type="button"
           onClick={() => onPageChange(page - 1)}
           disabled={page <= 1}
-          className="rounded border border-slate-700 px-2 py-1 disabled:cursor-not-allowed disabled:opacity-40"
+          className={buttonCls}
         >
           Previous
         </button>
-        <span className="tabular-nums">
+        <span className="tabular-nums text-faint">
           Page {page} of {pages}
         </span>
         <button
           type="button"
           onClick={() => onPageChange(page + 1)}
           disabled={page >= pages}
-          className="rounded border border-slate-700 px-2 py-1 disabled:cursor-not-allowed disabled:opacity-40"
+          className={buttonCls}
         >
           Next
         </button>

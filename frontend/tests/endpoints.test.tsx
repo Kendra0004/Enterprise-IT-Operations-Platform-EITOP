@@ -21,6 +21,7 @@ const overview = {
   windows: 1,
   linux: 1,
   other_os: 0,
+  inventory_reported: 1,
   latest_enrollments: [],
 };
 
@@ -37,11 +38,30 @@ function listHandler(options: { items?: unknown[]; total?: number; fail?: boolea
           500,
         );
       }
+      // Section queries (page_size=5) get their own realistic rows so the
+      // page never shows the same hostname twice under one render.
+      const pageSize = Number(url.searchParams.get("page_size") ?? 20);
+      if (pageSize === 5 && url.searchParams.get("status") === "offline") {
+        return jsonResponse({
+          items: [endpointRow({ id: "33333333-3333-3333-3333-333333333333", hostname: "edge-02", status: "offline" })],
+          total: 1,
+          page: 1,
+          page_size: 5,
+        });
+      }
+      if (pageSize === 5 && url.searchParams.get("sort") === "last_heartbeat_at") {
+        return jsonResponse({
+          items: [endpointRow({ id: "44444444-4444-4444-4444-444444444444", hostname: "db-01" })],
+          total: 1,
+          page: 1,
+          page_size: 5,
+        });
+      }
       return jsonResponse({
         items: options.items ?? [endpointRow()],
         total: options.total ?? 1,
         page: Number(url.searchParams.get("page") ?? 1),
-        page_size: Number(url.searchParams.get("page_size") ?? 20),
+        page_size: pageSize,
       });
     }
     return undefined;
@@ -155,7 +175,8 @@ describe("endpoint list page", () => {
 
     const alert = await screen.findByTestId("error-state");
     expect(alert).toHaveTextContent(/Server Error/);
-    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+    // main + section error states each offer a retry action
+    expect(screen.getAllByRole("button", { name: "Retry" }).length).toBeGreaterThan(0);
   });
 
   it("shows an empty state when no endpoints match", async () => {
@@ -175,7 +196,7 @@ describe("endpoint list page", () => {
     });
 
     expect(await screen.findByText("web-01")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Groups" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Endpoint Groups" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Endpoints" })).toBeInTheDocument();
   });
 });

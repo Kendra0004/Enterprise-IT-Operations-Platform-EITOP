@@ -1,8 +1,11 @@
-# Endpoint Management Dashboard (Phase 2.7)
+# Endpoint Management Dashboard (Phases 2.7–2.8)
 
 React + TypeScript + Vite + Tailwind + TanStack Query UI for endpoint
 health, inventory, history and groups. Built on the existing auth/RBAC
 context and the shared API client — no second state or routing framework.
+Phase 2.8 added the enterprise visual layer (design tokens, dark/light
+themes, app shell, shared components) — see
+`docs/frontend/design-system.md`.
 
 ## Routes
 
@@ -21,11 +24,24 @@ Nav: `Endpoints` and `Groups` appear only with `endpoints:read`.
 
 - Six stat cards (total / active / offline / revoked / windows / linux)
   from `GET /endpoints/overview` — real aggregates, never client-side
-  arithmetic on a partial page.
+  arithmetic on a partial page. Each card links to the corresponding
+  filtered view (`/endpoints?status=…`, `?os=…`).
+- Distribution section: status bar, OS bar (CSS-only, from the same
+  overview payload) and inventory coverage
+  (`inventory_reported / total` — new additive overview field).
+- Operational sections, each with its own loading/empty/error state:
+  recently enrolled (`latest_enrollments`), recently active
+  (`GET /endpoints?sort=last_heartbeat_at&page_size=5`), offline alerts
+  (rendered only when `overview.offline > 0`), and recent lifecycle
+  activity (`GET /audit-logs?page_size=100` narrowed client-side to
+  `endpoint.*` event types — the audit API filters exact types only;
+  requires `audit:read`).
 - Table columns: hostname (+ groups), OS + version, status badge, IP
-  addresses, agent version, last heartbeat, enrollment date — all UTC.
+  addresses, agent version, last heartbeat, **last inventory**
+  (`last_inventory_at`, new additive list field), enrollment date — all
+  UTC.
 - Filters: status (active/offline/revoked), OS, agent version, hostname
-  search, group — all server-side query params.
+  search (debounced), group — all server-side query params.
 - Sorting: clickable headers limited to allowlisted fields
   (`hostname`, `status`, `os`, `agent_version`, `enrolled_at`,
   `last_heartbeat_at`); server rejects anything else with 400.
@@ -95,9 +111,12 @@ See `groups.md`.
 | `endpoint-detail.test.tsx` | identity/OS/hardware/network/software/health rendering, revoke+rotate hidden without `endpoints:write`, revoke confirmation (no mutation before confirm, POST after), cancel without API call, backend 403 surfaced as an error |
 | `history.test.tsx` | snapshot list with UTC timestamps, comparison request (`compare_to`) and diff rendering, date-range params, empty state |
 | `groups.test.tsx` | group list with counts, create → POST, member list, remove with confirmation (DELETE only after confirm), assign endpoint, read-only control hiding |
+| `theme.test.tsx` | theme default dark, toggle → light with persistence, stored light preference restored; dashboard KPI links to filtered views, UTC audit timestamps, no stale Phase-1 copy |
 
 Plus the pre-existing `api-client.test.ts` and `routing.test.tsx`.
 
-No browser screenshots are included: this environment has no browser
-automation available, and the UI is verified through the DOM-level tests
-above and a production build (`npm run build`).
+Browser verification: Playwright (chromium headless) drives the real UI
+against the live stack — login flow plus every page × {dark, light} ×
+{1440×900, 1280×800, 768×1024, 390×844}, 57 screenshots stored in
+`docs/screenshots/`. Reproduce with `node frontend/scripts/screenshots.mjs`
+(details in `docs/frontend/design-system.md`).

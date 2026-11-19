@@ -46,12 +46,12 @@ export function ConfirmDialog({
         aria-modal="true"
         aria-labelledby="confirm-title"
         aria-describedby="confirm-desc"
-        className="w-full max-w-md rounded-lg border border-slate-700 bg-slate-900 p-5 shadow-xl"
+        className="w-full max-w-md rounded-lg border border-line bg-overlay p-5 shadow-pop"
       >
-        <h2 id="confirm-title" className="text-lg font-semibold text-slate-100">
+        <h2 id="confirm-title" className="text-lg font-semibold text-ink">
           {title}
         </h2>
-        <div id="confirm-desc" className="mt-2 text-sm text-slate-300">
+        <div id="confirm-desc" className="mt-2 text-sm text-muted">
           {description}
         </div>
         <div className="mt-5 flex justify-end gap-3">
@@ -59,7 +59,7 @@ export function ConfirmDialog({
             ref={cancelRef}
             type="button"
             onClick={onCancel}
-            className="rounded border border-slate-600 px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-800"
+            className="rounded-md border border-line px-3 py-1.5 text-sm text-ink hover:bg-raised"
           >
             Cancel
           </button>
@@ -67,8 +67,8 @@ export function ConfirmDialog({
             type="button"
             onClick={onConfirm}
             disabled={busy}
-            className={`rounded px-3 py-1.5 text-sm font-medium text-white disabled:opacity-60 ${
-              destructive ? "bg-red-600 hover:bg-red-500" : "bg-emerald-600 hover:bg-emerald-500"
+            className={`rounded-md px-3 py-1.5 text-sm font-medium text-accent-contrast disabled:opacity-60 ${
+              destructive ? "bg-danger hover:opacity-90" : "bg-accent hover:opacity-90"
             }`}
           >
             {busy ? "Working…" : confirmLabel}

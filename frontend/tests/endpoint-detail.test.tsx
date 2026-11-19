@@ -61,6 +61,10 @@ function detailHandler(
     const path = url.pathname;
     if (path.endsWith("/api/v1/auth/me")) return jsonResponse(makeUser(permissions));
     if (path.endsWith(`/api/v1/endpoints/${ID}/health`)) return jsonResponse(health);
+    if (path.endsWith("/api/v1/audit-logs")) {
+      // lifecycle activity for this endpoint (empty in the base fixture)
+      return jsonResponse({ items: [], total: 0, page: 1, page_size: 100 });
+    }
     if (path.endsWith(`/api/v1/endpoints/${ID}/software`)) {
       return jsonResponse({
         items: [

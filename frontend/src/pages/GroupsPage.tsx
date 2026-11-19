@@ -1,11 +1,12 @@
 /**
- * Endpoint groups (Phase 2.7): list, create, detail with members, and
- * assign/remove membership. Mutations require endpoints:write — the
- * backend enforces the same rule independently (403).
+ * Endpoint groups (Phases 2.7–2.8): list with search, create, detail with
+ * members, and assign/remove membership. Mutations require endpoints:write —
+ * the backend enforces the same rule independently (403).
  */
 
-import { useState, type FormEvent } from "react";
+import { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { FolderTree, UserMinus, UserPlus } from "lucide-react";
 import {
   useAddGroupMember,
   useCreateGroup,
@@ -15,6 +16,8 @@ import {
   useRemoveGroupMember,
 } from "../api/endpoints";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { PageHeader } from "../components/PageHeader";
+import { SearchInput } from "../components/SearchInput";
 import { StatusBadge } from "../components/StatusBadge";
 import { Empty, ErrorState, Loading } from "../components/states";
 import { useAuth } from "../auth/AuthContext";
@@ -29,12 +32,17 @@ export function GroupsPage() {
   const groups = useGroups();
   const group = useGroup(selectedId);
 
+  const [search, setSearch] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const create = useCreateGroup();
 
-  async function submitCreate(e: FormEvent) {
+  const filteredGroups = (groups.data ?? []).filter((g) =>
+    g.name.toLowerCase().includes(search.toLowerCase()),
+  );
+
+  async function submitCreate(e: React.FormEvent) {
     e.preventDefault();
     setFormError(null);
     try {
@@ -48,49 +56,53 @@ export function GroupsPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <header>
-        <h1 className="text-2xl font-semibold text-slate-100">Endpoint groups</h1>
-        <p className="text-sm text-slate-400">
-          Logical groupings used for filtering and future policy scoping.
-        </p>
-      </header>
+    <div className="space-y-5">
+      <PageHeader
+        title="Endpoint groups"
+        description="Logical groupings used for filtering and future policy scoping."
+      />
 
       {formError && (
-        <p role="alert" className="rounded border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-200">
+        <p
+          role="alert"
+          className="rounded-md border border-danger/40 bg-danger/10 p-3 text-sm text-danger"
+        >
           {formError}
         </p>
       )}
 
       {canWrite && (
-        <section aria-labelledby="create-group" className="rounded-lg border border-slate-800 bg-slate-900 p-4">
-          <h2 id="create-group" className="text-sm font-medium text-slate-300">
+        <section
+          aria-labelledby="create-group"
+          className="rounded-lg border border-line bg-surface p-4 shadow-card"
+        >
+          <h2 id="create-group" className="text-sm font-medium text-ink">
             Create group
           </h2>
           <form className="mt-3 flex flex-wrap items-end gap-3" onSubmit={submitCreate}>
-            <label className="flex flex-col gap-1 text-xs text-slate-400">
+            <label className="flex flex-col gap-1 text-xs text-muted">
               Name
               <input
                 required
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 maxLength={128}
-                className="rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-200"
+                className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-ink focus:border-accent"
               />
             </label>
-            <label className="flex flex-col gap-1 text-xs text-slate-400">
+            <label className="flex flex-col gap-1 text-xs text-muted">
               Description
               <input
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
                 maxLength={512}
-                className="rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-200"
+                className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-ink focus:border-accent"
               />
             </label>
             <button
               type="submit"
               disabled={create.isPending || name.trim().length === 0}
-              className="rounded bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+              className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-contrast hover:opacity-90 disabled:opacity-50"
             >
               {create.isPending ? "Creating…" : "Create"}
             </button>
@@ -98,44 +110,62 @@ export function GroupsPage() {
         </section>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-3">
-        <section aria-labelledby="group-list" className="lg:col-span-1">
-          <h2 id="group-list" className="mb-2 text-sm font-medium text-slate-300">
-            All groups
-          </h2>
-          {groups.isLoading && <Loading label="Loading groups…" />}
-          {groups.isError && (
-            <ErrorState error={groups.error} onRetry={() => void groups.refetch()} />
-          )}
-          {groups.data && groups.data.length === 0 && (
-            <Empty message="No groups yet." />
-          )}
+      <div className="grid gap-3 lg:grid-cols-3">
+        <section aria-label="All groups" className="lg:col-span-1">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <h2 className="text-sm font-medium text-ink">All groups</h2>
+            <span className="text-xs text-faint">
+              {groups.data ? `${groups.data.length} total` : ""}
+            </span>
+          </div>
           {groups.data && groups.data.length > 0 && (
-            <ul className="divide-y divide-slate-800 rounded-lg border border-slate-800 bg-slate-900">
-              {groups.data.map((g) => (
-                <li key={g.id}>
-                  <button
-                    type="button"
-                    onClick={() => setSearchParams({ group: g.id })}
-                    className={`flex w-full items-center justify-between px-4 py-3 text-left text-sm hover:bg-slate-800 ${
-                      selectedId === g.id ? "bg-slate-800" : ""
-                    }`}
-                  >
-                    <span className="text-slate-200">{g.name}</span>
-                    <span className="text-xs tabular-nums text-slate-500">
-                      {g.endpoint_count} endpoint(s)
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
+            <SearchInput
+              label="Search groups"
+              value={search}
+              onSearch={setSearch}
+              placeholder="group name…"
+              delay={200}
+            />
           )}
+          <div className="mt-2">
+            {groups.isLoading && <Loading label="Loading groups…" />}
+            {groups.isError && (
+              <ErrorState error={groups.error} onRetry={() => void groups.refetch()} />
+            )}
+            {groups.data && groups.data.length === 0 && (
+              <Empty message="No groups yet." />
+            )}
+            {groups.data && groups.data.length > 0 && filteredGroups.length === 0 && (
+              <Empty message="No groups match your search." />
+            )}
+            {filteredGroups.length > 0 && (
+              <ul className="divide-y divide-line rounded-lg border border-line bg-surface shadow-card">
+                {filteredGroups.map((g) => (
+                  <li key={g.id}>
+                    <button
+                      type="button"
+                      onClick={() => setSearchParams({ group: g.id })}
+                      className={`flex w-full items-center justify-between px-4 py-3 text-left text-sm transition-colors hover:bg-raised ${
+                        selectedId === g.id ? "bg-accent-soft" : ""
+                      }`}
+                    >
+                      <span className="flex items-center gap-2 text-ink">
+                        <FolderTree size={14} aria-hidden className="text-faint" />
+                        {g.name}
+                      </span>
+                      <span className="text-xs tabular-nums text-faint">
+                        {g.endpoint_count} endpoint(s)
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </section>
 
-        <section aria-labelledby="group-detail" className="lg:col-span-2">
-          <h2 id="group-detail" className="mb-2 text-sm font-medium text-slate-300">
-            Group detail
-          </h2>
+        <section aria-label="Group detail" className="lg:col-span-2">
+          <h2 className="mb-2 text-sm font-medium text-ink">Group detail</h2>
           {!selectedId && <Empty message="Select a group to view its members." />}
           {selectedId && group.isLoading && <Loading label="Loading group…" />}
           {selectedId && group.isError && (
@@ -166,7 +196,7 @@ function GroupMembers({ groupId, onChanged }: { groupId: string; onChanged: () =
   const memberIds = new Set(data.members.map((m) => m.id));
   const candidates = (endpoints.data?.items ?? []).filter((e) => !memberIds.has(e.id));
 
-  async function assign(e: FormEvent) {
+  async function assign(e: React.FormEvent) {
     e.preventDefault();
     if (!assignId) return;
     setError(null);
@@ -195,17 +225,20 @@ function GroupMembers({ groupId, onChanged }: { groupId: string; onChanged: () =
   }
 
   return (
-    <div className="space-y-4 rounded-lg border border-slate-800 bg-slate-900 p-4">
+    <div className="space-y-4 rounded-lg border border-line bg-surface p-4 shadow-card">
       <div>
-        <h3 className="text-base font-semibold text-slate-100">{data.name}</h3>
-        <p className="text-sm text-slate-400">{data.description || "No description."}</p>
-        <p className="mt-1 text-xs text-slate-500">
+        <h3 className="text-base font-semibold text-ink">{data.name}</h3>
+        <p className="text-sm text-muted">{data.description || "No description."}</p>
+        <p className="mt-1 text-xs text-faint">
           Created {formatUtcShort(data.created_at)} · {data.endpoint_count} member(s)
         </p>
       </div>
 
       {error && (
-        <p role="alert" className="rounded border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-200">
+        <p
+          role="alert"
+          className="rounded-md border border-danger/40 bg-danger/10 p-3 text-sm text-danger"
+        >
           {error}
         </p>
       )}
@@ -213,22 +246,29 @@ function GroupMembers({ groupId, onChanged }: { groupId: string; onChanged: () =
       {data.members.length === 0 ? (
         <Empty message="No endpoints in this group." />
       ) : (
-        <ul className="divide-y divide-slate-800">
+        <ul className="divide-y divide-line">
           {data.members.map((m) => (
-            <li key={m.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
-              <div className="flex items-center gap-3">
-                <Link to={`/endpoints/${m.id}`} className="text-sm font-medium text-sky-300 hover:underline">
+            <li
+              key={m.id}
+              className="flex flex-wrap items-center justify-between gap-2 py-2"
+            >
+              <div className="flex flex-wrap items-center gap-3">
+                <Link
+                  to={`/endpoints/${m.id}`}
+                  className="text-sm font-medium text-accent hover:underline"
+                >
                   {m.hostname}
                 </Link>
                 <StatusBadge status={m.status} />
-                <span className="text-xs text-slate-500">{m.os}</span>
+                <span className="text-xs text-faint">{m.os}</span>
               </div>
               {canWrite && (
                 <button
                   type="button"
                   onClick={() => setConfirmRemove({ id: m.id, hostname: m.hostname })}
-                  className="rounded border border-red-500/50 px-2 py-1 text-xs text-red-300 hover:bg-red-500/10"
+                  className="flex items-center gap-1 rounded-md border border-danger/50 px-2 py-1 text-xs text-danger transition-colors hover:bg-danger/10"
                 >
+                  <UserMinus size={12} aria-hidden />
                   Remove
                 </button>
               )}
@@ -239,12 +279,12 @@ function GroupMembers({ groupId, onChanged }: { groupId: string; onChanged: () =
 
       {canWrite && (
         <form className="flex flex-wrap items-end gap-2" onSubmit={assign}>
-          <label className="flex flex-col gap-1 text-xs text-slate-400">
+          <label className="flex flex-col gap-1 text-xs text-muted">
             Add endpoint
             <select
               value={assignId}
               onChange={(e) => setAssignId(e.target.value)}
-              className="rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-200"
+              className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-ink"
             >
               <option value="">Choose an endpoint…</option>
               {candidates.map((e) => (
@@ -257,8 +297,9 @@ function GroupMembers({ groupId, onChanged }: { groupId: string; onChanged: () =
           <button
             type="submit"
             disabled={!assignId || addMember.isPending}
-            className="rounded bg-slate-700 px-3 py-1.5 text-sm text-white hover:bg-slate-600 disabled:opacity-50"
+            className="flex items-center gap-1 rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-contrast hover:opacity-90 disabled:opacity-50"
           >
+            <UserPlus size={13} aria-hidden />
             Add
           </button>
         </form>

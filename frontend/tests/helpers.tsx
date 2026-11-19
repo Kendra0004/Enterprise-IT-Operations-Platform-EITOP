@@ -118,6 +118,7 @@ export function endpointRow(overrides: Record<string, unknown> = {}) {
     updated_at: "2026-11-19T02:00:00+00:00",
     groups: ["production"],
     ip_addresses: ["192.0.2.10"],
+    last_inventory_at: "2026-11-19T02:05:00+00:00",
     ...overrides,
   };
 }

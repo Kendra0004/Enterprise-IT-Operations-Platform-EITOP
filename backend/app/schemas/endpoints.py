@@ -69,6 +69,8 @@ class EndpointOut(BaseModel):
     groups: list[str] = Field(default_factory=list)
     # Reported IPs from the last inventory (empty when none reported).
     ip_addresses: list[str] = Field(default_factory=list)
+    # Last successful inventory submission (Phase 2.8 table column).
+    last_inventory_at: datetime | None = None
 
 
 class EndpointDetailOut(EndpointOut):
@@ -78,7 +80,6 @@ class EndpointDetailOut(EndpointOut):
     metadata: MetadataOut | None = None
     facts: list[FactOut] = Field(default_factory=list)
     software_count: int = 0
-    last_inventory_at: datetime | None = None
 
 
 # --- Health (Phase 2.5) -----------------------------------------------------
@@ -110,6 +111,9 @@ class OverviewStatsOut(BaseModel):
     windows: int
     linux: int
     other_os: int
+    # Endpoints that submitted at least one inventory (last_inventory_at set).
+    # Powers the dashboard's inventory-collection-health indicator.
+    inventory_reported: int = 0
     latest_enrollments: list[EndpointOut] = Field(default_factory=list)
 
 

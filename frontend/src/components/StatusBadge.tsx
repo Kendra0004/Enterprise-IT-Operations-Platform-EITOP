@@ -1,5 +1,6 @@
-/** Lifecycle/health status badge. Colors are semantic; the text is always
- * present so the state is not conveyed by color alone (accessibility). */
+/** Lifecycle/health status badge. Colors are semantic tokens that follow the
+ * active theme; the text label is always present so the state is never
+ * conveyed by color alone (accessibility). */
 
 export type BadgeStatus =
   | "active"
@@ -10,12 +11,30 @@ export type BadgeStatus =
   | "pending";
 
 const STYLES: Record<BadgeStatus, { cls: string; label: string }> = {
-  active: { cls: "bg-emerald-500/15 text-emerald-300 ring-emerald-500/40", label: "Active" },
-  offline: { cls: "bg-amber-500/15 text-amber-300 ring-amber-500/40", label: "Offline" },
-  revoked: { cls: "bg-red-500/15 text-red-300 ring-red-500/40", label: "Revoked" },
-  healthy: { cls: "bg-emerald-500/15 text-emerald-300 ring-emerald-500/40", label: "Healthy" },
-  late: { cls: "bg-amber-500/15 text-amber-300 ring-amber-500/40", label: "Late" },
-  pending: { cls: "bg-slate-500/15 text-slate-300 ring-slate-500/40", label: "Pending" },
+  active: {
+    cls: "bg-ok/10 text-ok ring-ok/40",
+    label: "Active",
+  },
+  offline: {
+    cls: "bg-warn/10 text-warn ring-warn/40",
+    label: "Offline",
+  },
+  revoked: {
+    cls: "bg-danger/10 text-danger ring-danger/40",
+    label: "Revoked",
+  },
+  healthy: {
+    cls: "bg-ok/10 text-ok ring-ok/40",
+    label: "Healthy",
+  },
+  late: {
+    cls: "bg-warn/10 text-warn ring-warn/40",
+    label: "Late",
+  },
+  pending: {
+    cls: "bg-raised text-muted ring-line-strong",
+    label: "Pending",
+  },
 };
 
 export function StatusBadge({ status }: { status: string }) {

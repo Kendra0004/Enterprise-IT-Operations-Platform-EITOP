@@ -400,6 +400,14 @@ def endpoints_overview(db: DbSession, _: EndpointsRead) -> OverviewStatsOut:
     windows = os_counts.get("windows", 0)
     linux = os_counts.get("linux", 0)
     total = sum(counts.values())
+    inventory_reported = (
+        db.scalar(
+            select(func.count())
+            .select_from(Endpoint)
+            .where(Endpoint.last_inventory_at.is_not(None))
+        )
+        or 0
+    )
     latest = db.scalars(
         select(Endpoint).order_by(Endpoint.enrolled_at.desc()).limit(5)
     ).all()
@@ -412,6 +420,7 @@ def endpoints_overview(db: DbSession, _: EndpointsRead) -> OverviewStatsOut:
         windows=windows,
         linux=linux,
         other_os=max(0, total - windows - linux),
+        inventory_reported=inventory_reported,
         latest_enrollments=[_to_out(e, ip_map.get(e.id)) for e in latest],
     )
 
@@ -446,6 +455,7 @@ def _to_out(endpoint: Endpoint, ip_addresses: list[str] | None = None) -> Endpoi
         updated_at=endpoint.updated_at,
         groups=[g.name for g in endpoint.groups],
         ip_addresses=list(ip_addresses or []),
+        last_inventory_at=endpoint.last_inventory_at,
     )
 
 
@@ -476,7 +486,6 @@ def get_endpoint(
         metadata=MetadataOut.model_validate(meta) if meta else None,
         facts=[FactOut.model_validate(f) for f in facts],
         software_count=software_count,
-        last_inventory_at=endpoint.last_inventory_at,
     )
 
 

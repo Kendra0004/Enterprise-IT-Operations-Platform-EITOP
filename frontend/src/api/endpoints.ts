@@ -37,6 +37,7 @@ export interface EndpointRow {
   updated_at: string;
   groups: string[];
   ip_addresses: string[];
+  last_inventory_at: string | null;
 }
 
 export interface EndpointMetadata {
@@ -87,6 +88,8 @@ export interface OverviewStats {
   windows: number;
   linux: number;
   other_os: number;
+  /** Endpoints that submitted at least one inventory (API-computed). */
+  inventory_reported: number;
   latest_enrollments: EndpointRow[];
 }
 
@@ -209,6 +212,46 @@ export function useOverview() {
   return useQuery({
     queryKey: ["endpoints", "overview"],
     queryFn: () => api.get<OverviewStats>("/endpoints/overview"),
+  });
+}
+
+// --- Endpoint activity (real audit events, Phase 2.8) ----------------------
+
+export interface AuditEvent {
+  id: string;
+  event_type: string;
+  actor_email: string | null;
+  target: string | null;
+  outcome: string;
+  created_at: string;
+}
+
+/**
+ * Recent lifecycle audit events (`endpoint.*`). The audit API filters by
+ * exact event_type only, so one page is fetched and narrowed client-side —
+ * still real API data, one request, no per-event polling. Requires
+ * `audit:read`; callers gate with `enabled`.
+ */
+export function useEndpointActivity({
+  enabled = true,
+  target,
+  limit = 8,
+}: { enabled?: boolean; target?: string; limit?: number } = {}) {
+  return useQuery({
+    queryKey: ["audit", "endpoint-activity", target ?? "all", limit],
+    enabled,
+    queryFn: async () => {
+      const page = await api.get<Page<AuditEvent>>("/audit-logs", {
+        query: { page_size: 100 },
+      });
+      return page.items
+        .filter(
+          (event) =>
+            event.event_type.startsWith("endpoint.") &&
+            (target === undefined || event.target === target),
+        )
+        .slice(0, limit);
+    },
   });
 }
 

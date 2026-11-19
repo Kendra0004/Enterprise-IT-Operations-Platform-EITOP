@@ -8,10 +8,14 @@ import { EndpointListPage } from "./pages/EndpointListPage";
 import { GroupsPage } from "./pages/GroupsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { UnderDevelopment } from "./pages/UnderDevelopment";
+import { ThemeProvider } from "./theme/ThemeProvider";
 
 export function App() {
   return (
-    <Routes>
+    // UI-level provider: mounted inside App so every render path (tests
+    // included) has theme state without depending on main.tsx wiring.
+    <ThemeProvider>
+      <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route element={<ProtectedRoute />}>
         <Route element={<AppLayout />}>
@@ -56,6 +60,7 @@ export function App() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Route>
-    </Routes>
+      </Routes>
+    </ThemeProvider>
   );
 }

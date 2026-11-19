@@ -410,8 +410,18 @@ def test_list_filters_status_os_agent_version_hostname(
 
 
 def test_overview_counts_are_real(client, auth_headers):
-    win_id, _ = _enroll(client, auth_headers, "ov-win", os="windows")
+    win_id, win_cred = _enroll(client, auth_headers, "ov-win", os="windows")
     _enroll(client, auth_headers, "ov-lin", os="linux")
+
+    # One endpoint reports inventory → inventory_reported reflects it.
+    from tests.test_agent_api import _agent_headers, _inventory
+
+    inv = client.post(
+        "/api/v1/agent/inventory",
+        headers=_agent_headers(win_cred),
+        json=_inventory("ov-win"),
+    )
+    assert inv.status_code == 200, inv.text
 
     body = client.get("/api/v1/endpoints/overview", headers=auth_headers).json()
     assert body["total"] >= 2
@@ -419,6 +429,8 @@ def test_overview_counts_are_real(client, auth_headers):
     assert body["linux"] >= 1
     assert body["total"] == body["active"] + body["offline"] + body["revoked"]
     assert body["total"] == body["windows"] + body["linux"] + body["other_os"]
+    assert isinstance(body["inventory_reported"], int)
+    assert 1 <= body["inventory_reported"] <= body["total"]
     assert len(body["latest_enrollments"]) >= 1
     assert any(e["id"] == win_id for e in body["latest_enrollments"])
 
@@ -430,3 +442,31 @@ def test_overview_visible_to_readonly(client, readonly_user):
     assert {"total", "active", "offline", "revoked", "windows", "linux"} <= set(
         resp.json()
     )
+
+
+def test_list_rows_include_last_inventory_at(client, auth_headers):
+    """Phase 2.8: list rows expose the last inventory timestamp so the
+    dashboard table can show collection recency without extra requests."""
+    endpoint_id, cred = _enroll(client, auth_headers, "invcol-host")
+
+    def fetch_row():
+        items = client.get(
+            "/api/v1/endpoints",
+            headers=auth_headers,
+            params={"q": "invcol"},
+        ).json()["items"]
+        return next(r for r in items if r["id"] == endpoint_id)
+
+    assert fetch_row()["last_inventory_at"] is None
+
+    from tests.test_agent_api import _agent_headers, _inventory
+
+    resp = client.post(
+        "/api/v1/agent/inventory",
+        headers=_agent_headers(cred),
+        json=_inventory("invcol-host"),
+    )
+    assert resp.status_code == 200, resp.text
+
+    row = fetch_row()
+    assert row["last_inventory_at"] is not None

@@ -51,7 +51,24 @@ npm run build      # production build gate
 ```
 
 Covers: API client problem parsing / bearer attach / network failure /
-token storage, route protection redirect, login form render.
+token storage, route protection redirect, login form, endpoint
+list/detail/history/groups pages, theme switching and dashboard KPI
+links (Phase 2.8).
+
+## Browser verification + screenshots (Playwright)
+
+With the stack running (`docker compose up -d`, UI at
+`http://localhost:8080`):
+
+```bash
+cd frontend
+npm i -D @playwright/test        # once
+npx playwright install chromium  # once (add --with-deps where sudo allows)
+node scripts/screenshots.mjs     # login + every page × dark/light × 4 viewports
+```
+
+Output: 57 PNGs in `docs/screenshots/` (see
+`docs/frontend/design-system.md` for the matrix and limitations).
 
 ## Static analysis
 

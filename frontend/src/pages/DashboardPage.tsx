@@ -1,7 +1,31 @@
+/**
+ * Platform dashboard.
+ *
+ * Shows ONLY real backend data:
+ * - session info (from /auth/me)
+ * - platform readiness (from /health/ready)
+ * - endpoint KPIs (from /endpoints/overview) for endpoints:read holders
+ * - recent audit events (from /audit-logs) for audit:read holders
+ */
+
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { api, ApiError } from "../api/client";
+import { Link } from "react-router-dom";
+import {
+  Activity,
+  Clock,
+  Database,
+  MonitorSmartphone,
+  Server,
+  ShieldAlert,
+} from "lucide-react";
+import { api } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import { useOverview } from "../api/endpoints";
+import { PageHeader } from "../components/PageHeader";
+import { StatCard } from "../components/StatCard";
+import { ErrorState, Loading } from "../components/states";
+import { formatUtcShort } from "../utils/datetime";
 
 interface ReadyResponse {
   status: string;
@@ -19,12 +43,6 @@ interface AuditPage {
   total: number;
 }
 
-/**
- * Dashboard shows ONLY real backend data:
- * - session info (from /auth/me)
- * - platform readiness (from /health/ready)
- * - recent audit events (admin/audit holders only)
- */
 export function DashboardPage() {
   const { user, hasPermission } = useAuth();
 
@@ -35,148 +53,239 @@ export function DashboardPage() {
     retry: 1,
   });
 
+  const overview = useOverview();
+  const stats = overview.data;
+
   const audit = useQuery({
     queryKey: ["audit-recent"],
-    queryFn: () => api.get<AuditPage>("/audit-logs", { query: { page_size: 5 } }),
+    queryFn: () => api.get<AuditPage>("/audit-logs", { query: { page_size: 8 } }),
     enabled: hasPermission("audit:read"),
   });
 
-  return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold">Dashboard</h1>
-        <p className="text-sm text-slate-400">
-          Signed in as {user?.email} — roles: {user?.roles.join(", ") || "none"}
-        </p>
-      </div>
+  const canSeeEndpoints = hasPermission("endpoints:read");
 
-      <section aria-labelledby="platform-status" className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+  return (
+    <div className="space-y-5">
+      <PageHeader
+        title="Dashboard"
+        description={`Signed in as ${user?.email} — roles: ${user?.roles.join(", ") || "none"}`}
+      />
+
+      {/* --- Platform readiness --- */}
+      <section aria-labelledby="platform-status" className="grid gap-3 sm:grid-cols-3">
         <h2 id="platform-status" className="sr-only">
           Platform status
         </h2>
 
-        <Card title="API health">
-          {ready.isLoading ? (
-            <Skeleton />
-          ) : (
-            <StatusLine label="API" value={ready.data?.status ?? "unknown"} />
-          )}
-        </Card>
+        <StatusCard
+          title="API health"
+          icon={<Server size={15} aria-hidden />}
+          loading={ready.isLoading}
+        >
+          <StatusLine label="API" value={ready.data?.status ?? "unknown"} />
+        </StatusCard>
 
-        <Card title="Database">
-          {ready.isLoading ? (
-            <Skeleton />
-          ) : (
-            <StatusLine
-              label="PostgreSQL"
-              value={ready.data?.checks?.database ?? "unknown"}
-            />
-          )}
-        </Card>
+        <StatusCard
+          title="Database"
+          icon={<Database size={15} aria-hidden />}
+          loading={ready.isLoading}
+        >
+          <StatusLine
+            label="PostgreSQL"
+            value={ready.data?.checks?.database ?? "unknown"}
+          />
+        </StatusCard>
 
-        <Card title="Cache / jobs">
-          {ready.isLoading ? (
-            <Skeleton />
-          ) : (
-            <StatusLine label="Redis" value={ready.data?.checks?.redis ?? "unknown"} />
-          )}
-        </Card>
+        <StatusCard
+          title="Cache / jobs"
+          icon={<Activity size={15} aria-hidden />}
+          loading={ready.isLoading}
+        >
+          <StatusLine label="Redis" value={ready.data?.checks?.redis ?? "unknown"} />
+        </StatusCard>
       </section>
 
-      <section aria-labelledby="session-heading" className="grid gap-4 sm:grid-cols-2">
-        <h2 id="session-heading" className="sr-only">
-          Session
-        </h2>
-        <Card title="Your permissions">
-          <ul className="flex flex-wrap gap-2">
+      {/* --- Endpoint KPIs (real overview data) --- */}
+      {canSeeEndpoints && (
+        <section aria-label="Endpoint statistics">
+          <div className="mb-2 flex items-center justify-between">
+            <h2 className="text-sm font-medium text-ink">Endpoints</h2>
+            <Link to="/endpoints" className="text-xs text-accent hover:underline">
+              Open endpoint management →
+            </Link>
+          </div>
+          {overview.isLoading && <Loading label="Loading overview…" />}
+          {overview.isError && (
+            <ErrorState
+              inline
+              error={overview.error}
+              onRetry={() => void overview.refetch()}
+            />
+          )}
+          {stats && (
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              <StatCard
+                label="Total"
+                value={stats.total}
+                icon={Server}
+                href="/endpoints"
+                ariaLabel={`${stats.total} endpoints — view all`}
+              />
+              <StatCard
+                label="Active"
+                value={stats.active}
+                icon={MonitorSmartphone}
+                tone="ok"
+                href="/endpoints?status=active"
+                ariaLabel={`${stats.active} active endpoints — view`}
+              />
+              <StatCard
+                label="Offline"
+                value={stats.offline}
+                icon={Clock}
+                tone={stats.offline > 0 ? "warn" : "neutral"}
+                href="/endpoints?status=offline"
+                ariaLabel={`${stats.offline} offline endpoints — view`}
+              />
+              <StatCard
+                label="Revoked"
+                value={stats.revoked}
+                icon={ShieldAlert}
+                tone={stats.revoked > 0 ? "danger" : "neutral"}
+                href="/endpoints?status=revoked"
+                ariaLabel={`${stats.revoked} revoked endpoints — view`}
+              />
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* --- Session + recent activity --- */}
+      <div className="grid gap-3 lg:grid-cols-2">
+        <section
+          aria-labelledby="session-heading"
+          className="rounded-lg border border-line bg-surface p-4 shadow-card"
+        >
+          <h2 id="session-heading" className="text-sm font-medium text-ink">
+            Your permissions
+          </h2>
+          <ul className="mt-3 flex flex-wrap gap-2">
             {user?.permissions.map((p) => (
               <li
                 key={p}
-                className="rounded bg-slate-800 px-2 py-0.5 font-mono text-xs text-emerald-300"
+                className="rounded bg-accent-soft px-2 py-0.5 font-mono text-xs text-accent"
               >
                 {p}
               </li>
             ))}
           </ul>
-        </Card>
-
-        <Card title="Modules">
-          <p className="text-sm text-slate-400">
-            10 feature modules are listed in the sidebar. Everything except
-            Dashboard and Administration is <em>under development</em> in Phase 1.
+          <p className="mt-3 text-xs text-faint">
+            Endpoint management and groups are live. Sidebar modules marked
+            “soon” are honest previews — not operational features.
           </p>
-        </Card>
-      </section>
-
-      {hasPermission("audit:read") && (
-        <section aria-labelledby="recent-activity">
-          <h2 id="recent-activity" className="mb-2 text-lg font-medium">
-            Recent audit events
-          </h2>
-          {audit.isLoading && (
-            <Card title="">
-              <Skeleton />
-            </Card>
-          )}
-          {audit.data && audit.data.items.length > 0 && (
-            <ul className="divide-y divide-slate-800 rounded-lg border border-slate-800 bg-slate-900">
-              {audit.data.items.map((e) => (
-                <li key={e.id} className="flex items-center justify-between px-4 py-2 text-sm">
-                  <span className="font-mono text-slate-300">{e.event_type}</span>
-                  <span className="text-slate-400">{e.actor_email ?? "—"}</span>
-                  <span
-                    className={
-                      e.outcome === "success" ? "text-emerald-400" : "text-red-400"
-                    }
-                  >
-                    {e.outcome}
-                  </span>
-                  <span className="text-xs text-slate-500">
-                    {new Date(e.created_at).toLocaleString()}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-          {audit.data && audit.data.items.length === 0 && (
-            <p className="text-sm text-slate-500">No audit events yet.</p>
-          )}
-          {audit.isError && audit.error instanceof ApiError && (
-            <p className="text-sm text-amber-400">
-              Could not load audit events: {audit.error.problem.title}
-            </p>
-          )}
         </section>
-      )}
+
+        {hasPermission("audit:read") && (
+          <section
+            aria-labelledby="recent-activity"
+            className="rounded-lg border border-line bg-surface p-4 shadow-card"
+          >
+            <h2 id="recent-activity" className="text-sm font-medium text-ink">
+              Recent audit events
+            </h2>
+            <div className="mt-1">
+              {audit.isLoading && <Loading label="Loading audit events…" />}
+              {audit.isError && (
+                <ErrorState
+                  inline
+                  error={audit.error}
+                  onRetry={() => void audit.refetch()}
+                />
+              )}
+              {audit.data && audit.data.items.length === 0 && (
+                <p className="py-3 text-sm text-faint">No audit events yet.</p>
+              )}
+              {audit.data && audit.data.items.length > 0 && (
+                <ul className="divide-y divide-line">
+                  {audit.data.items.map((e) => (
+                    <li key={e.id} className="flex items-center justify-between gap-3 py-2 text-sm">
+                      <span className="truncate font-mono text-xs text-ink">
+                        {e.event_type}
+                      </span>
+                      <span className="truncate text-xs text-muted">
+                        {e.actor_email ?? "—"}
+                      </span>
+                      <span
+                        className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium ${
+                          e.outcome === "success"
+                            ? "bg-ok/10 text-ok"
+                            : "bg-danger/10 text-danger"
+                        }`}
+                      >
+                        {e.outcome}
+                      </span>
+                      <time
+                        dateTime={e.created_at}
+                        className="hidden shrink-0 text-xs tabular-nums text-faint sm:block"
+                      >
+                        {formatUtcShort(e.created_at)}
+                      </time>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </section>
+        )}
+      </div>
     </div>
   );
 }
 
-function Card({ title, children }: { title: string; children: ReactNode }) {
+function StatusCard({
+  title,
+  icon,
+  loading,
+  children,
+}: {
+  title: string;
+  icon: ReactNode;
+  loading: boolean;
+  children: ReactNode;
+}) {
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
-      {title && <h3 className="mb-2 text-sm font-medium text-slate-400">{title}</h3>}
-      {children}
+    <div className="rounded-lg border border-line bg-surface p-4 shadow-card">
+      <h3 className="flex items-center gap-1.5 text-sm font-medium text-ink">
+        <span className="text-faint">{icon}</span>
+        {title}
+      </h3>
+      <div className="mt-2">
+        {loading ? (
+          <div
+            className="h-4 w-2/3 animate-pulse rounded bg-raised"
+            aria-hidden
+          />
+        ) : (
+          children
+        )}
+      </div>
     </div>
   );
 }
 
 function StatusLine({ label, value }: { label: string; value: string }) {
-  const ok = value === "ok";
+  // /health/ready reports "ready"; /health checks report "ok". Both healthy.
+  const ok = value === "ok" || value === "ready";
   return (
     <p className="flex items-center gap-2 text-sm">
       <span
         className={`inline-block h-2.5 w-2.5 rounded-full ${
-          ok ? "bg-emerald-500" : value === "unknown" ? "bg-slate-600" : "bg-amber-500"
+          ok ? "bg-ok" : value === "unknown" ? "bg-line-strong" : "bg-warn"
         }`}
         aria-hidden
       />
-      <span className="text-slate-300">{label}</span>
-      <span className={ok ? "text-emerald-400" : "text-amber-400"}>{value}</span>
+      <span className="text-muted">{label}</span>
+      <span className={ok ? "text-ok" : "text-warn"}>{value}</span>
     </p>
   );
-}
-
-function Skeleton() {
-  return <div className="h-4 w-2/3 animate-pulse rounded bg-slate-800" aria-hidden />;
 }

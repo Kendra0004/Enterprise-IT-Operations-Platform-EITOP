@@ -1,14 +1,28 @@
 /**
- * Endpoint detail (Phase 2.7): identity, OS, hardware, network, software,
- * agent/heartbeat health, and the management actions (health, history,
- * revoke, rotate, group membership) gated by RBAC.
+ * Endpoint detail (Phases 2.5–2.8): identity, OS, hardware, network,
+ * software, activity/health, group membership and the management actions
+ * (revoke, rotate) gated by RBAC. Sections stay mounted — the section nav
+ * scrolls rather than hides, so deep links and tests see everything.
  */
 
 import { useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
+  Activity,
+  Cpu,
+  Fingerprint,
+  HardDrive,
+  History,
+  KeyRound,
+  Network,
+  Package,
+  Power,
+  ShieldCheck,
+} from "lucide-react";
+import {
   useAddGroupMember,
   useEndpoint,
+  useEndpointActivity,
   useEndpointHealth,
   useEndpointSoftware,
   useGroups,
@@ -17,10 +31,21 @@ import {
   useRotateCredential,
 } from "../api/endpoints";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { ActivityList } from "../components/ActivityList";
+import { ErrorState, Loading, Empty } from "../components/states";
+import { PageHeader } from "../components/PageHeader";
+import { SectionNav } from "../components/SectionNav";
 import { StatusBadge } from "../components/StatusBadge";
-import { Empty, ErrorState, Loading } from "../components/states";
 import { useAuth } from "../auth/AuthContext";
 import { ageLabel, formatBytes, formatUtc } from "../utils/datetime";
+
+const SECTIONS = [
+  { id: "overview", label: "Overview" },
+  { id: "hardware", label: "Hardware" },
+  { id: "software", label: "Software" },
+  { id: "network", label: "Network" },
+  { id: "activity", label: "Activity & health" },
+];
 
 export function EndpointDetailPage() {
   const { id } = useParams();
@@ -31,7 +56,13 @@ export function EndpointDetailPage() {
   const detail = useEndpoint(id);
   const health = useEndpointHealth(id);
   const groups = useGroups();
+  const activity = useEndpointActivity({
+    enabled: hasPermission("audit:read"),
+    target: id,
+    limit: 10,
+  });
 
+  const [activeSection, setActiveSection] = useState("overview");
   const [confirm, setConfirm] = useState<"revoke" | "rotate" | null>(null);
   const [rotatedCredential, setRotatedCredential] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -52,6 +83,14 @@ export function EndpointDetailPage() {
   if (!ep) return <Empty message="Endpoint not found." />;
 
   const notInGroups = (groups.data ?? []).filter((g) => !ep.groups.includes(g.name));
+
+  function scrollTo(sectionId: string) {
+    setActiveSection(sectionId);
+    document.getElementById(`section-${sectionId}`)?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+  }
 
   async function runRevoke() {
     if (!id) return;
@@ -103,55 +142,49 @@ export function EndpointDetailPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <header className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <nav aria-label="Breadcrumb" className="text-xs text-slate-500">
-            <Link to="/endpoints" className="hover:text-slate-300">
-              Endpoints
-            </Link>{" "}
-            / <span className="text-slate-300">{ep.hostname}</span>
-          </nav>
-          <h1 className="mt-1 flex flex-wrap items-center gap-3 text-2xl font-semibold text-slate-100">
-            {ep.hostname}
-            <StatusBadge status={health.data?.collector_status ?? ep.status} />
-          </h1>
-          <p className="text-sm text-slate-400">
-            {ep.fqdn ?? "No FQDN"} · {ep.os} {ep.os_version ?? ""} · agent{" "}
-            {ep.agent_version ?? "unknown"}
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Link
-            to={`/endpoints/${ep.id}/history`}
-            className="rounded border border-slate-600 px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-800"
-          >
-            Inventory history
-          </Link>
-          {canWrite && (
-            <>
-              <button
-                type="button"
-                onClick={() => setConfirm("rotate")}
-                className="rounded border border-slate-600 px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-800"
-              >
-                Rotate credential
-              </button>
-              <button
-                type="button"
-                onClick={() => setConfirm("revoke")}
-                disabled={ep.status === "revoked"}
-                className="rounded bg-red-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                Revoke endpoint
-              </button>
-            </>
-          )}
-        </div>
-      </header>
+    <div className="space-y-5">
+      <PageHeader
+        title={ep.hostname}
+        description={`${ep.fqdn ?? "No FQDN"} · ${ep.os} ${ep.os_version ?? ""} · agent ${ep.agent_version ?? "unknown"}`}
+        actions={
+          <>
+            <Link
+              to={`/endpoints/${ep.id}/history`}
+              className="flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-sm text-muted transition-colors hover:bg-raised hover:text-ink"
+            >
+              <History size={14} aria-hidden />
+              Inventory history
+            </Link>
+            {canWrite && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setConfirm("rotate")}
+                  className="flex items-center gap-1.5 rounded-md border border-line px-3 py-1.5 text-sm text-muted transition-colors hover:bg-raised hover:text-ink"
+                >
+                  <KeyRound size={14} aria-hidden />
+                  Rotate credential
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirm("revoke")}
+                  disabled={ep.status === "revoked"}
+                  className="flex items-center gap-1.5 rounded-md bg-danger px-3 py-1.5 text-sm font-medium text-accent-contrast transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Power size={14} aria-hidden />
+                  Revoke endpoint
+                </button>
+              </>
+            )}
+          </>
+        }
+      />
 
       {actionError && (
-        <p role="alert" className="rounded border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-200">
+        <p
+          role="alert"
+          className="rounded-md border border-danger/40 bg-danger/10 p-3 text-sm text-danger"
+        >
           {actionError}
         </p>
       )}
@@ -159,51 +192,73 @@ export function EndpointDetailPage() {
       {rotatedCredential && (
         <section
           aria-label="New credential"
-          className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-100"
+          className="rounded-lg border border-warn/40 bg-warn/10 p-4 text-sm"
         >
-          <p className="font-medium">
+          <p className="font-medium text-warn">
             New credential — shown exactly once. Update the agent now.
           </p>
-          <code className="mt-2 block break-all rounded bg-slate-950 p-2 font-mono text-xs text-amber-200">
+          <code className="mt-2 block break-all rounded bg-canvas p-2 font-mono text-xs text-ink">
             {rotatedCredential}
           </code>
           <button
             type="button"
             onClick={() => setRotatedCredential(null)}
-            className="mt-2 rounded border border-amber-400/60 px-3 py-1"
+            className="mt-2 rounded-md border border-warn/60 px-3 py-1 text-warn hover:bg-warn/10"
           >
             Dismiss
           </button>
         </section>
       )}
 
-      <section aria-label="Health" className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      {/* --- Health strip --- */}
+      <section
+        aria-label="Endpoint health"
+        className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"
+      >
         <InfoCard label="Lifecycle status">
-          <StatusBadge status={ep.status} />{" "}
-          <span className="text-slate-400">({health.data?.collector_status ?? "—"})</span>
+          <span className="flex items-center gap-2">
+            <StatusBadge status={ep.status} />
+            <span className="text-xs text-faint">
+              {health.data?.collector_status ?? "—"}
+            </span>
+          </span>
         </InfoCard>
         <InfoCard label="Last heartbeat">
           {formatUtc(ep.last_heartbeat_at)}
-          {health.data?.seconds_since_heartbeat !== null &&
-            health.data?.seconds_since_heartbeat !== undefined && (
-              <span className="ml-2 text-slate-500">{ageLabel(ep.last_heartbeat_at)} ago</span>
-            )}
+          {ep.last_heartbeat_at && (
+            <span className="ml-2 text-xs text-faint">
+              {ageLabel(ep.last_heartbeat_at)} ago
+            </span>
+          )}
         </InfoCard>
         <InfoCard label="Last inventory">{formatUtc(ep.last_inventory_at)}</InfoCard>
         <InfoCard label="Enrolled">{formatUtc(ep.enrolled_at)}</InfoCard>
       </section>
 
       {health.data && (
-        <p className="text-xs text-slate-500">
-          Expected heartbeat every {health.data.heartbeat_interval_seconds}s · offline after{" "}
-          {health.data.offline_threshold_seconds}s · server time{" "}
+        <p className="text-xs text-faint">
+          Expected heartbeat every {health.data.heartbeat_interval_seconds}s ·
+          offline after {health.data.offline_threshold_seconds}s · server time{" "}
           {formatUtc(health.data.server_time)}
         </p>
       )}
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <InfoCard title="Identity">
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+      {/* --- Section nav --- */}
+      <SectionNav
+        sections={SECTIONS}
+        active={activeSection}
+        onSelect={scrollTo}
+      />
+
+      {/* --- Overview --- */}
+      <section
+        id="section-overview"
+        aria-label="Overview"
+        className="grid gap-3 lg:grid-cols-2"
+        style={{ scrollMarginTop: "1rem" }}
+      >
+        <Card title="Identity" icon={<Fingerprint size={14} aria-hidden />}>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
             <Dt>Hostname</Dt>
             <Dd>{ep.hostname}</Dd>
             <Dt>FQDN</Dt>
@@ -213,10 +268,10 @@ export function EndpointDetailPage() {
             <Dt>Groups</Dt>
             <Dd>{ep.groups.length > 0 ? ep.groups.join(", ") : "—"}</Dd>
           </dl>
-        </InfoCard>
+        </Card>
 
-        <InfoCard title="Operating system">
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+        <Card title="Operating system" icon={<ShieldCheck size={14} aria-hidden />}>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
             <Dt>OS</Dt>
             <Dd>{ep.os}</Dd>
             <Dt>Version</Dt>
@@ -225,36 +280,75 @@ export function EndpointDetailPage() {
             <Dd>{ep.os_arch ?? "—"}</Dd>
             <Dt>Kernel</Dt>
             <Dd>{ep.kernel_version ?? "—"}</Dd>
+            <Dt>Agent version</Dt>
+            <Dd>{ep.agent_version ?? "—"}</Dd>
           </dl>
-        </InfoCard>
+        </Card>
+      </section>
 
-        <InfoCard title="Hardware">
+      {/* --- Hardware --- */}
+      <section
+        id="section-hardware"
+        aria-label="Hardware"
+        style={{ scrollMarginTop: "1rem" }}
+      >
+        <Card title="Hardware" icon={<Cpu size={14} aria-hidden />}>
           {meta ? (
-            <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-              <Dt>Manufacturer</Dt>
-              <Dd>{meta.manufacturer ?? "—"}</Dd>
-              <Dt>Model</Dt>
-              <Dd>{meta.model ?? "—"}</Dd>
-              <Dt>Serial</Dt>
-              <Dd>{meta.serial_number ?? "—"}</Dd>
-              <Dt>CPU</Dt>
-              <Dd>
-                {meta.cpu_model ?? "—"}
-                {meta.cpu_cores ? ` · ${meta.cpu_cores} cores` : ""}
-              </Dd>
-              <Dt>Memory</Dt>
-              <Dd>{formatBytes(meta.memory_bytes)}</Dd>
-              <Dt>Storage</Dt>
-              <Dd>{formatBytes(meta.disk_bytes)}</Dd>
+            <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm md:grid-cols-3">
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-faint">
+                  Manufacturer
+                </dt>
+                <dd className="text-ink">{meta.manufacturer ?? "—"}</dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-faint">Model</dt>
+                <dd className="text-ink">{meta.model ?? "—"}</dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-faint">Serial</dt>
+                <dd className="text-ink">{meta.serial_number ?? "—"}</dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-faint">CPU</dt>
+                <dd className="text-ink">
+                  {meta.cpu_model ?? "—"}
+                  {meta.cpu_cores ? ` · ${meta.cpu_cores} cores` : ""}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-faint">Memory</dt>
+                <dd className="text-ink">{formatBytes(meta.memory_bytes)}</dd>
+              </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-faint">Storage</dt>
+                <dd className="text-ink">{formatBytes(meta.disk_bytes)}</dd>
+              </div>
             </dl>
           ) : (
-            <p className="text-sm text-slate-500">No inventory reported yet.</p>
+            <p className="text-sm text-faint">No inventory reported yet.</p>
           )}
-        </InfoCard>
+        </Card>
+      </section>
 
-        <InfoCard title="Network">
+      {/* --- Software --- */}
+      <section
+        id="section-software"
+        aria-label="Software"
+        style={{ scrollMarginTop: "1rem" }}
+      >
+        <SoftwareSection endpointId={ep.id} />
+      </section>
+
+      {/* --- Network --- */}
+      <section
+        id="section-network"
+        aria-label="Network"
+        style={{ scrollMarginTop: "1rem" }}
+      >
+        <Card title="Network" icon={<Network size={14} aria-hidden />}>
           {meta && meta.ip_addresses.length + meta.mac_addresses.length > 0 ? (
-            <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+            <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
               <Dt>IP addresses</Dt>
               <Dd className="font-mono text-xs">
                 {meta.ip_addresses.length > 0 ? meta.ip_addresses.join(", ") : "—"}
@@ -265,25 +359,76 @@ export function EndpointDetailPage() {
               </Dd>
             </dl>
           ) : (
-            <p className="text-sm text-slate-500">No network data reported yet.</p>
+            <p className="text-sm text-faint">No network data reported yet.</p>
           )}
-        </InfoCard>
-      </div>
+        </Card>
+      </section>
 
-      <SoftwareSection endpointId={ep.id} />
+      {/* --- Activity & health --- */}
+      <section
+        id="section-activity"
+        aria-label="Activity and health"
+        className="grid gap-3 lg:grid-cols-2"
+        style={{ scrollMarginTop: "1rem" }}
+      >
+        <Card title="Endpoint activity" icon={<Activity size={14} aria-hidden />}>
+          {!hasPermission("audit:read") ? (
+            <p className="text-sm text-faint">
+              Requires the audit:read permission.
+            </p>
+          ) : (
+            <>
+              {activity.isLoading && <Loading label="Loading activity…" />}
+              {activity.isError && (
+                <ErrorState
+                  inline
+                  error={activity.error}
+                  onRetry={() => void activity.refetch()}
+                />
+              )}
+              {activity.data && (
+                <ActivityList
+                  events={activity.data}
+                  emptyMessage="No lifecycle events recorded for this endpoint."
+                />
+              )}
+            </>
+          )}
+        </Card>
 
-      <section aria-labelledby="groups-heading" className="rounded-lg border border-slate-800 bg-slate-900 p-4">
-        <h2 id="groups-heading" className="text-sm font-medium text-slate-300">
+        <Card title="Inventory collection" icon={<HardDrive size={14} aria-hidden />}>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+            <Dt>Last inventory</Dt>
+            <Dd>{formatUtc(ep.last_inventory_at)}</Dd>
+            <Dt>Packages reported</Dt>
+            <Dd>{ep.software_count}</Dd>
+            <Dt>Collector status</Dt>
+            <Dd>
+              <StatusBadge status={health.data?.collector_status ?? "pending"} />
+            </Dd>
+          </dl>
+        </Card>
+      </section>
+
+      {/* --- Groups --- */}
+      <section
+        aria-labelledby="groups-heading"
+        className="rounded-lg border border-line bg-surface p-4 shadow-card"
+      >
+        <h2 id="groups-heading" className="text-sm font-medium text-ink">
           Groups
         </h2>
         {ep.groups.length === 0 ? (
-          <p className="mt-2 text-sm text-slate-500">Not assigned to any group.</p>
+          <p className="mt-2 text-sm text-faint">Not assigned to any group.</p>
         ) : (
           <ul className="mt-2 flex flex-wrap gap-2">
             {ep.groups.map((name) => {
               const group = groups.data?.find((g) => g.name === name);
               return (
-                <li key={name} className="flex items-center gap-2 rounded bg-slate-800 px-2 py-1 text-sm text-slate-200">
+                <li
+                  key={name}
+                  className="flex items-center gap-2 rounded bg-raised px-2 py-1 text-sm text-ink"
+                >
                   {group ? (
                     <Link to={`/groups?group=${group.id}`} className="hover:underline">
                       {name}
@@ -296,7 +441,7 @@ export function EndpointDetailPage() {
                       type="button"
                       aria-label={`Remove ${name} from group`}
                       onClick={() => group && void unassign(group.id)}
-                      className="text-slate-500 hover:text-red-300"
+                      className="text-faint hover:text-danger"
                     >
                       ✕
                     </button>
@@ -314,14 +459,14 @@ export function EndpointDetailPage() {
               void assign();
             }}
           >
-            <label htmlFor="assign-group" className="text-xs text-slate-400">
+            <label htmlFor="assign-group" className="text-xs text-muted">
               Assign to group
             </label>
             <select
               id="assign-group"
               value={assignGroup}
               onChange={(e) => setAssignGroup(e.target.value)}
-              className="rounded border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-200"
+              className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-ink"
             >
               <option value="">Choose a group…</option>
               {notInGroups.map((g) => (
@@ -333,7 +478,7 @@ export function EndpointDetailPage() {
             <button
               type="submit"
               disabled={!assignGroup || addMember.isPending}
-              className="rounded bg-slate-700 px-3 py-1.5 text-sm text-white hover:bg-slate-600 disabled:opacity-50"
+              className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-contrast hover:opacity-90 disabled:opacity-50"
             >
               Add
             </button>
@@ -347,8 +492,8 @@ export function EndpointDetailPage() {
         description={
           <>
             <strong>{ep.hostname}</strong> will be permanently revoked: its agent
-            credential stops working immediately and the endpoint can never return
-            to active status. This cannot be undone.
+            credential stops working immediately and the endpoint can never
+            return to active status. This cannot be undone.
           </>
         }
         confirmLabel="Revoke"
@@ -376,7 +521,7 @@ export function EndpointDetailPage() {
       <button
         type="button"
         onClick={() => navigate("/endpoints")}
-        className="text-sm text-slate-400 hover:text-slate-200"
+        className="text-sm text-muted hover:text-ink"
       >
         ← Back to endpoints
       </button>
@@ -387,12 +532,17 @@ export function EndpointDetailPage() {
 function SoftwareSection({ endpointId }: { endpointId: string }) {
   const [name, setName] = useState("");
   const [applied, setApplied] = useState("");
-  const software = useEndpointSoftware(endpointId, { view: "current", name: applied, page_size: 50 });
+  const software = useEndpointSoftware(endpointId, {
+    view: "current",
+    name: applied,
+    page_size: 50,
+  });
 
   return (
-    <section aria-labelledby="software-heading" className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+    <div className="rounded-lg border border-line bg-surface p-4 shadow-card">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 id="software-heading" className="text-sm font-medium text-slate-300">
+        <h2 className="flex items-center gap-1.5 text-sm font-medium text-ink">
+          <Package size={14} aria-hidden className="text-faint" />
           Installed software
         </h2>
         <form
@@ -410,15 +560,22 @@ function SoftwareSection({ endpointId }: { endpointId: string }) {
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="Filter package…"
-            className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-sm text-slate-200"
+            className="rounded-md border border-line-strong bg-surface px-2 py-1.5 text-sm text-ink placeholder:text-faint focus:border-accent"
           />
-          <button type="submit" className="rounded bg-slate-700 px-3 py-1 text-sm text-white hover:bg-slate-600">
+          <button
+            type="submit"
+            className="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-contrast hover:opacity-90"
+          >
             Filter
           </button>
         </form>
       </div>
 
-      {software.isLoading && <div className="mt-3"><Loading label="Loading packages…" /></div>}
+      {software.isLoading && (
+        <div className="mt-3">
+          <Loading label="Loading packages…" />
+        </div>
+      )}
       {software.isError && (
         <div className="mt-3">
           <ErrorState error={software.error} onRetry={() => void software.refetch()} />
@@ -431,56 +588,69 @@ function SoftwareSection({ endpointId }: { endpointId: string }) {
       )}
       {software.data && software.data.items.length > 0 && (
         <>
-          <ul className="mt-3 max-h-72 divide-y divide-slate-800 overflow-y-auto">
+          <ul className="mt-3 max-h-72 divide-y divide-line overflow-y-auto">
             {software.data.items.map((pkg) => (
-              <li key={`${pkg.name}-${pkg.package_manager}`} className="flex items-center justify-between py-2 text-sm">
-                <span className="text-slate-200">{pkg.name}</span>
-                <span className="font-mono text-xs text-slate-400">
+              <li
+                key={`${pkg.name}-${pkg.package_manager}`}
+                className="flex items-center justify-between py-2 text-sm"
+              >
+                <span className="text-ink">{pkg.name}</span>
+                <span className="font-mono text-xs text-muted">
                   {pkg.version} · {pkg.package_manager}
                 </span>
               </li>
             ))}
           </ul>
-          <p className="mt-2 text-xs text-slate-500">
+          <p className="mt-2 text-xs text-faint">
             {software.data.total} package(s) ·{" "}
-            <Link to={`/endpoints/${endpointId}/history`} className="text-sky-400 hover:underline">
+            <Link
+              to={`/endpoints/${endpointId}/history`}
+              className="text-accent hover:underline"
+            >
               view install/remove history
             </Link>
           </p>
         </>
       )}
-    </section>
+    </div>
   );
 }
 
-function InfoCard({
+function Card({
   title,
-  label,
+  icon,
   children,
 }: {
-  title?: string;
-  label?: string;
+  title: string;
+  icon?: ReactNode;
   children: ReactNode;
 }) {
-  if (label) {
-    return (
-      <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
-        <p className="text-xs uppercase tracking-wide text-slate-500">{label}</p>
-        <div className="mt-1 text-sm text-slate-200">{children}</div>
-      </div>
-    );
-  }
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
-      <h2 className="text-sm font-medium text-slate-300">{title}</h2>
-      <div className="mt-2">{children}</div>
+    <div className="rounded-lg border border-line bg-surface p-4 shadow-card">
+      <h3 className="flex items-center gap-1.5 text-sm font-medium text-ink">
+        {icon && <span className="text-faint">{icon}</span>}
+        {title}
+      </h3>
+      <div className="mt-3">{children}</div>
+    </div>
+  );
+}
+
+function InfoCard({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="rounded-lg border border-line bg-surface p-4 shadow-card">
+      <p className="text-[11px] font-medium uppercase tracking-wider text-faint">
+        {label}
+      </p>
+      <div className="mt-1 text-sm text-ink">{children}</div>
     </div>
   );
 }
 
 function Dt({ children }: { children: ReactNode }) {
-  return <dt className="text-slate-500">{children}</dt>;
+  return <dt className="text-faint">{children}</dt>;
 }
+
 function Dd({ children, className = "" }: { children: ReactNode; className?: string }) {
-  return <dd className={`text-slate-200 ${className}`}>{children}</dd>;
+  return <dd className={`text-ink ${className}`}>{children}</dd>;
 }
