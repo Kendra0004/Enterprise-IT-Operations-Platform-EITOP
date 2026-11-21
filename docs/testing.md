@@ -27,6 +27,13 @@ docker compose run --rm --entrypoint "" tester \
 > and re-seeded idempotently. Tests that need Postgres/Redis are skipped
 > **with an explicit reason** when the service is unreachable — the suite
 > never silently substitutes a fake database.
+>
+> `tests/test_directory_migration.py` is the exception that proves the rule:
+> it creates its own scratch database (`eitop_mig_*`), runs
+> `alembic upgrade head` → `downgrade 0004` → `upgrade head` against it in a
+> subprocess with an overridden `DATABASE_URL`, and drops it afterwards — so
+> the shared test schema is never downgraded. It skips with an explicit
+> reason if `CREATE DATABASE` is denied.
 
 ### What is covered
 
@@ -40,6 +47,12 @@ docker compose run --rm --entrypoint "" tester \
 | DB config, session rollback, token hash uniqueness | `tests/test_database.py` |
 | Rate limiter windows, identifier isolation, X-Forwarded-For | `tests/test_rate_limit.py` |
 | CSRF origin check, security headers, audit DB immutability, production doc gating, timing-equalized login, bootstrap safety | `tests/test_security_hardening.py` |
+| Endpoint enrollment, inventory/heartbeat, snapshots/diff, groups admin API | `tests/test_enrollment.py`, `tests/test_agent_api.py`, `tests/test_heartbeat_health.py`, `tests/test_snapshots.py`, `tests/test_groups_api.py`, `tests/test_endpoints_admin_api.py`, `tests/test_endpoint_models.py` |
+| AD client: TLS handshake (trusted/untrusted/expired/hostname mismatch), StartTLS, no plaintext/bypass, paged search, filter escaping, error classification | `tests/test_directory_client.py` |
+| AD sync engine: category fail-fast, missing-marking grace, upsert idempotency, reconciliation rules, run lifecycle, enqueue failure, stale-reap/concurrency | `tests/test_directory_sync.py` |
+| AD API: RBAC matrix, write-only bind password tracing, connection scoping, sanitized test/sync errors, 409/503/400 contracts | `tests/test_directory_api.py` |
+| AD migration round-trip (downgrade/upgrade) on an **isolated scratch database** | `tests/test_directory_migration.py` |
+| AD real-protocol (optional): TLS handshake → bind → paged search → wrong-password classification over a real TLS socket — **OpenLDAP, not real AD**; 3 explicit skips unless `EITOP_OPENLDAP_URL` is set | `tests/test_directory_openldap.py` |
 
 ## Frontend (vitest)
 
@@ -52,8 +65,10 @@ npm run build      # production build gate
 
 Covers: API client problem parsing / bearer attach / network failure /
 token storage, route protection redirect, login form, endpoint
-list/detail/history/groups pages, theme switching and dashboard KPI
-links (Phase 2.8).
+list/detail/history/groups pages, theme switching, dashboard KPI
+links (Phase 2.8), and the Active Directory page — tab navigation,
+connection-scoped queries, RBAC denial/affordance behavior, write-only
+bind-password field, sanitized test/sync results (Phase 3.1).
 
 ## Browser verification + screenshots (Playwright)
 

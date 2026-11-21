@@ -7,6 +7,13 @@ Phase 2.5/2.6 background jobs:
 - ``prune_endpoint_snapshots`` — retention enforcement; a no-op unless an
   operator sets ``SNAPSHOT_RETENTION_DAYS`` (default: keep forever).
 
+Phase 3.1:
+- ``sync_directory`` — executes one sync run to completion; the run row
+  always reaches a terminal state (success/failed/skipped) inside the
+  task, so a crashed worker can never leave a run ``running`` forever
+  (the stale reaper on the next trigger is the second line of defence).
+- ``directory_sync_tick`` — beat-driven enqueue of due scheduled syncs.
+
 No FastAPI request handler ever polls the database for health state.
 """
 
@@ -61,4 +68,38 @@ def prune_endpoint_snapshots() -> int:
         return int(getattr(result, "rowcount", 0) or 0)
 
 
-__all__ = ["prune_endpoint_snapshots", "scan_endpoint_offline"]
+@celery_app.task(name="eitop.sync_directory")
+def sync_directory(run_id: str) -> str:
+    """Execute one directory sync run (Phase 3.1).
+
+    Returns the terminal run status. The engine always finalizes the run
+    (success/failed/skipped) — even on unexpected errors — so a ``running``
+    row can never outlive its task; the stale reaper on the next trigger
+    covers hard worker crashes on top of that.
+    """
+    import uuid as _uuid
+
+    from app.services.directory.sync_engine import execute_sync
+
+    return execute_sync(_uuid.UUID(run_id))
+
+
+@celery_app.task(name="eitop.directory_sync_tick")
+def directory_sync_tick() -> int:
+    """Beat task: enqueue scheduled directory syncs that are due.
+
+    Returns the number of runs enqueued. Concurrency conflicts (409) and
+    broker failures (503) are handled per connection inside the service
+    and never abort the remaining connections.
+    """
+    from app.services.directory.connection_service import enqueue_due_syncs
+
+    return enqueue_due_syncs()
+
+
+__all__ = [
+    "directory_sync_tick",
+    "prune_endpoint_snapshots",
+    "scan_endpoint_offline",
+    "sync_directory",
+]

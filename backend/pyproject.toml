@@ -18,6 +18,8 @@ dependencies = [
     "packaging>=24.0,<26.0",
     "argon2-cffi>=23.1,<26.0",
     "pyjwt>=2.9,<3.0",
+    "ldap3>=2.9,<3.0",
+    "cryptography>=42,<46",
 ]
 
 [project.optional-dependencies]
@@ -48,7 +50,7 @@ plugins = ["pydantic.mypy"]
 exclude = ["alembic/versions"]
 
 [[tool.mypy.overrides]]
-module = ["celery.*", "argon2.*"]
+module = ["celery.*", "argon2.*", "ldap3.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

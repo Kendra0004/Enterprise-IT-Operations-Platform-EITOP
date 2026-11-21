@@ -31,19 +31,32 @@ PERMISSIONS: dict[str, str] = {
     "assets:read": "View assets",
     "assets:write": "Manage assets",
     "reports:read": "Read and export reports",
+    "directory:read": "View Active Directory data and sync history",
+    "directory:write": "Manage directory connections",
+    "directory:sync": "Test and synchronize directory connections",
 }
 
 # Initial roles from the platform spec.
 ROLES: dict[str, tuple[str, list[str]]] = {
     "admin": (
         "Full platform administrator",
-        ["admin:read", "admin:write", "audit:read", "endpoints:read", "endpoints:write"],
+        [
+            "admin:read",
+            "admin:write",
+            "audit:read",
+            "endpoints:read",
+            "endpoints:write",
+            "directory:read",
+            "directory:write",
+            "directory:sync",
+        ],
     ),
     "security_auditor": (
         "Read-only security and audit access",
         [
             "audit:read",
             "endpoints:read",
+            "directory:read",
             "security:read",
             "vulns:read",
             "network:read",
@@ -56,6 +69,7 @@ ROLES: dict[str, tuple[str, list[str]]] = {
         [
             "endpoints:read",
             "endpoints:write",
+            "directory:read",
             "network:read",
             "automation:read",
             "automation:execute",
@@ -68,6 +82,7 @@ ROLES: dict[str, tuple[str, list[str]]] = {
         "Read-only access across modules",
         [
             "endpoints:read",
+            "directory:read",
             "security:read",
             "vulns:read",
             "network:read",

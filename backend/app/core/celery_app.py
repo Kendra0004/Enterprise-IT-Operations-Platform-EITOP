@@ -32,6 +32,7 @@ celery_app.conf.update(
     result_expires=3600 * 24,
     # Periodic jobs (Phase 2.5/2.6): offline detection runs continuously;
     # snapshot retention is a daily no-op unless explicitly configured.
+    # Phase 3.1: directory sync scan runs on its own (configurable) tick.
     beat_schedule={
         "scan-endpoint-offline": {
             "task": "eitop.scan_endpoint_offline",
@@ -40,6 +41,10 @@ celery_app.conf.update(
         "prune-endpoint-snapshots": {
             "task": "eitop.prune_endpoint_snapshots",
             "schedule": 60.0 * 60.0 * 24.0,  # daily
+        },
+        "directory-sync-tick": {
+            "task": "eitop.directory_sync_tick",
+            "schedule": float(settings.directory_sync_scan_seconds),
         },
     },
 )

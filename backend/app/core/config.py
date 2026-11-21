@@ -55,6 +55,21 @@ class Settings(BaseSettings):
     # retention never deletes history unless an operator opts in.
     snapshot_retention_days: int | None = Field(default=None, ge=1)
 
+    # --- Directory integration (Phase 3.1) ----------------------------------
+    # Beat tick that scans for due auto-sync connections (per-connection
+    # cadence is sync_interval_minutes on the connection row).
+    directory_sync_scan_seconds: int = Field(default=300, ge=30)
+    # LDAP connect/search budgets. The stale-run reaper threshold must stay
+    # above the worst-case (connect + full search) budget.
+    directory_connect_timeout_seconds: int = Field(default=10, ge=1, le=120)
+    directory_search_timeout_seconds: int = Field(default=30, ge=1, le=600)
+    directory_page_size: int = Field(default=500, ge=1, le=5000)
+    # Grace period before a never-seen-again object is marked missing.
+    directory_missing_grace_days: int = Field(default=7, ge=1, le=90)
+    # A 'running' sync row older than this is reaped as failed (crashed
+    # worker / lost broker) so retries are never blocked forever.
+    directory_stale_run_minutes: int = Field(default=30, ge=5, le=1440)
+
     @field_validator("app_env")
     @classmethod
     def _known_env(cls, v: str) -> str:

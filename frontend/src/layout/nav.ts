@@ -44,8 +44,9 @@ export const NAV_ITEMS: NavItem[] = [
   },
   { label: "Administration", path: "/admin", icon: Users, permission: "admin:read", preview: true },
 
+  { label: "Active Directory", path: "/active-directory", icon: ShieldCheck, permission: "directory:read" },
+
   // --- Preview modules (Phase 1 placeholders; not operational features) ---
-  { label: "Active Directory", path: "/active-directory", icon: ShieldCheck, permission: "endpoints:read", preview: true },
   { label: "Security & Compliance", path: "/security", icon: ShieldAlert, permission: "security:read", preview: true },
   { label: "Vulnerabilities", path: "/vulnerabilities", icon: ScanSearch, permission: "vulns:read", preview: true },
   { label: "Network", path: "/network", icon: Network, permission: "network:read", preview: true },

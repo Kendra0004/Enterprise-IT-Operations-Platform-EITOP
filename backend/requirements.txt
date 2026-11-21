@@ -17,3 +17,9 @@ celery>=5.4,<6.0
 packaging>=24.0,<26.0
 argon2-cffi>=23.1,<26.0
 pyjwt>=2.9,<3.0
+# LDAP client for the read-only Active Directory integration (Phase 3.1).
+# Pure Python; ships ldap3.mock used by the test suite.
+ldap3>=2.9,<3.0
+# Fernet encryption-at-rest for directory bind passwords (Phase 3.1) —
+# keyed by the existing SECRET_KEY via HKDF (see services/directory/secrets.py).
+cryptography>=42,<46
