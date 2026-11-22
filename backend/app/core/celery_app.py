@@ -13,6 +13,22 @@ from app.core.config import get_settings
 
 settings = get_settings()
 
+# --- Runtime limits (Phase 3.1.1): one consistent ladder --------------------
+# Sized from config so the DB, the worker and the broker agree:
+#   directory_max_sync_minutes  = DB hard cap on one run   (from run creation)
+#   task_soft_time_limit        = same, from task start    (graceful failure)
+#   task_time_limit             = soft + 1 min             (hard worker kill)
+#   broker visibility_timeout   = max + 15 min             (unacked redelivery)
+# The run is created before the task starts, so the database reaps a run
+# at or before the soft limit; the hard limit then guarantees the worker
+# dies shortly after; visibility_timeout staying ABOVE task_time_limit
+# guarantees Redis never redelivers a task that is still running. The
+# execution-token lease (directory_sync_lease_seconds) makes any
+# duplicate delivery harmless regardless: the second worker skips.
+_SYNC_SOFT_LIMIT_SECONDS = settings.directory_max_sync_minutes * 60
+_SYNC_HARD_LIMIT_SECONDS = _SYNC_SOFT_LIMIT_SECONDS + 60
+_VISIBILITY_TIMEOUT_SECONDS = (settings.directory_max_sync_minutes + 15) * 60
+
 celery_app = Celery(
     "eitop",
     broker=settings.redis_url,
@@ -30,6 +46,13 @@ celery_app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,  # fair scheduling for long-running jobs
     result_expires=3600 * 24,
+    # Every task is bounded (Phase 3.1.1); eitop.sync_directory is the
+    # longest-running one and defines the ladder above.
+    task_soft_time_limit=_SYNC_SOFT_LIMIT_SECONDS,
+    task_time_limit=_SYNC_HARD_LIMIT_SECONDS,
+    # Explicit broker redelivery window for the Redis transport: must
+    # exceed task_time_limit or a live task could be delivered twice.
+    broker_transport_options={"visibility_timeout": _VISIBILITY_TIMEOUT_SECONDS},
     # Periodic jobs (Phase 2.5/2.6): offline detection runs continuously;
     # snapshot retention is a daily no-op unless explicitly configured.
     # Phase 3.1: directory sync scan runs on its own (configurable) tick.

@@ -59,16 +59,32 @@ class Settings(BaseSettings):
     # Beat tick that scans for due auto-sync connections (per-connection
     # cadence is sync_interval_minutes on the connection row).
     directory_sync_scan_seconds: int = Field(default=300, ge=30)
-    # LDAP connect/search budgets. The stale-run reaper threshold must stay
-    # above the worst-case (connect + full search) budget.
+    # LDAP connect/search budgets (per operation — one bound per probe,
+    # bind or page read; the sync run as a whole is bounded by
+    # directory_max_sync_minutes below).
     directory_connect_timeout_seconds: int = Field(default=10, ge=1, le=120)
     directory_search_timeout_seconds: int = Field(default=30, ge=1, le=600)
     directory_page_size: int = Field(default=500, ge=1, le=5000)
     # Grace period before a never-seen-again object is marked missing.
     directory_missing_grace_days: int = Field(default=7, ge=1, le=90)
-    # A 'running' sync row older than this is reaped as failed (crashed
-    # worker / lost broker) so retries are never blocked forever.
+    # --- Sync run lifecycle limits (Phase 3.1.1) ----------------------------
+    # Fallback staleness: a run that was NEVER claimed (lost broker
+    # delivery, pre-lease rows) is reaped as failed after this long so
+    # retries are never blocked. Runs holding a live lease are NOT reaped
+    # by this threshold — the executing worker renews its lease.
     directory_stale_run_minutes: int = Field(default=30, ge=5, le=1440)
+    # Absolute wall-clock cap for ONE sync run, measured from run creation
+    # and enforced by the reaper even while the lease is live. Also sizes
+    # the Celery ladder (app/core/celery_app.py): task_soft_time_limit =
+    # this value from task start, task_time_limit = +1 min, broker
+    # visibility_timeout = +15 min. Keep them in this order.
+    directory_max_sync_minutes: int = Field(default=60, ge=5, le=1440)
+    # Ownership lease of the executing worker. Renewed by a heartbeat
+    # thread every lease/3 and re-checked atomically before each mirror
+    # commit and before finalizing run status; an expired lease means the
+    # worker must stop without writing. Must be far below the max duration
+    # (so several renewals fit) and comfortably above the heartbeat tick.
+    directory_sync_lease_seconds: int = Field(default=300, ge=30, le=3600)
 
     @field_validator("app_env")
     @classmethod
@@ -86,6 +102,19 @@ class Settings(BaseSettings):
             raise ValueError(
                 "endpoint_offline_threshold_seconds must be >= "
                 "endpoint_heartbeat_interval_seconds"
+            )
+        return v
+
+    @field_validator("directory_max_sync_minutes")
+    @classmethod
+    def _max_sync_ge_stale(cls, v: int, info) -> int:  # type: ignore[no-untyped-def]
+        # The absolute cap is the strongest bound; the never-claimed
+        # fallback threshold may not exceed it (otherwise it would be dead
+        # configuration that no reaper branch could ever fire after).
+        stale = info.data.get("directory_stale_run_minutes", 30)
+        if v < stale:
+            raise ValueError(
+                "directory_max_sync_minutes must be >= directory_stale_run_minutes"
             )
         return v
 

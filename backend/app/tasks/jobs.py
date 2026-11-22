@@ -11,7 +11,15 @@ Phase 3.1:
 - ``sync_directory`` — executes one sync run to completion; the run row
   always reaches a terminal state (success/failed/skipped) inside the
   task, so a crashed worker can never leave a run ``running`` forever
-  (the stale reaper on the next trigger is the second line of defence).
+  (the lease-aware reaper on the next trigger is the second line of
+  defence). Phase 3.1.1: the engine claims the run with an execution
+  token + lease before any write — a duplicate delivery of the same run
+  (broker redelivery) loses the claim and returns ``skipped`` without
+  touching data or run status. The task is bounded by the limits set in
+  ``app/core/celery_app.py`` (``task_soft_time_limit`` /
+  ``task_time_limit`` sized from ``directory_max_sync_minutes``, with
+  the broker ``visibility_timeout`` above them), so it cannot outlive
+  its DB lease ladder indefinitely.
 - ``directory_sync_tick`` — beat-driven enqueue of due scheduled syncs.
 
 No FastAPI request handler ever polls the database for health state.
@@ -74,8 +82,11 @@ def sync_directory(run_id: str) -> str:
 
     Returns the terminal run status. The engine always finalizes the run
     (success/failed/skipped) — even on unexpected errors — so a ``running``
-    row can never outlive its task; the stale reaper on the next trigger
-    covers hard worker crashes on top of that.
+    row can never outlive its task; the lease-aware stale reaper on the
+    next trigger covers hard worker crashes on top of that. Ownership
+    (Phase 3.1.1): only the worker holding the run's execution token and
+    a live lease may write mirror data or finalize the status; every
+    other delivery returns ``skipped`` untouched.
     """
     import uuid as _uuid
 

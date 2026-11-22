@@ -161,6 +161,16 @@ def test_migration_round_trip_on_isolated_database(scratch_db):
     checks = " ".join(_check_constraints(scratch_db, "directory_group_memberships"))
     assert "unknown" in checks
 
+    # Phase 3.1.1 ownership columns (execution token + lease) are present.
+    assert _column(scratch_db, "directory_sync_runs", "execution_token") == {
+        "data_type": "character varying",
+        "is_nullable": "YES",
+    }
+    assert _column(scratch_db, "directory_sync_runs", "lease_expires_at") == {
+        "data_type": "timestamp with time zone",
+        "is_nullable": "YES",
+    }
+
     # 2. Downgrade past the directory migration.
     down = _run(scratch_db, "downgrade", "0004")
     assert down.returncode == 0, down.stderr[-3000:]
@@ -175,6 +185,9 @@ def test_migration_round_trip_on_isolated_database(scratch_db):
     ] == "YES"
     checks = " ".join(_check_constraints(scratch_db, "directory_group_memberships"))
     assert "unknown" in checks
+    assert _column(scratch_db, "directory_sync_runs", "execution_token")[
+        "data_type"
+    ] == "character varying"
 
 
 def _columns(dbname: str, table: str) -> list[tuple]:

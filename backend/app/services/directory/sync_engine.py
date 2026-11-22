@@ -21,6 +21,14 @@ Invariants (tested in tests/test_directory_sync.py):
 - **category_results / errors persist sanitized labels only** (see
   errors.py) — never credentials, raw exception content, or directory
   attribute payloads.
+- **Single live owner per run** (Phase 3.1.1): the worker claims the run
+  with an execution token + renewable lease BEFORE any write, re-proves
+  ownership atomically with the mirror commit, and may finalize ``status``
+  only while still the owner of a still-``running`` run. Duplicate task
+  deliveries and expired/revoked workers return ``skipped`` without
+  modifying mirror data or run status; the stale reaper only collects
+  runs whose lease expired (or that were never claimed and aged out, or
+  exceeded the absolute max duration) — never a live worker.
 - The engine only ever issues LDAP reads through ``DirectoryLdapClient``
   (bind + searches); it cannot modify Active Directory.
 """
@@ -88,6 +96,14 @@ from app.services.directory.normalize import (
     first,
     uac_enabled,
 )
+from app.services.directory.ownership import (
+    LeaseHeartbeat,
+    OwnershipLostError,
+    claim_run,
+    extend_lease,
+    finalize_if_owned,
+    new_execution_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -140,18 +156,33 @@ def execute_sync(
 ) -> str:
     """Execute a sync run to completion.
 
-    Returns ``success`` / ``failed`` / ``skipped`` (stale task: the run was
-    already finished or cascaded away). Three phases with separate
-    sessions so a data rollback can never lose run bookkeeping:
-    A) validate the run, B) mirror transaction, C) finalize + audit.
+    Returns ``success`` / ``failed`` / ``skipped`` (the run was already
+    finished or cascaded away, this delivery lost the ownership claim, or
+    this worker's lease was revoked/expired mid-run). Phases with
+    separate sessions so a data rollback can never lose run bookkeeping:
+    A) claim exclusive ownership (execution token + lease),
+    B) mirror transaction — ownership re-proven before the first write
+       and atomically with the commit,
+    C) finalize + audit — only while still the owner of a still-running
+       run, so a stale worker never overwrites a reaped run's status.
     """
-    # --- Phase A: the run must still be actionable --------------------------
+    # --- Phase A: claim exclusive ownership of the run -----------------------
+    token = new_execution_token()
     with session_factory() as db:
         run = db.get(DirectorySyncRun, run_id)
         if run is None or run.status != SYNC_RUNNING:
-            return "skipped"  # duplicate/stale task delivery
+            return "skipped"  # duplicate/stale task delivery (terminal)
         connection_id = run.connection_id
         trigger = run.trigger
+        if not claim_run(db, run_id, token):
+            # Another worker holds a live lease (duplicate delivery while
+            # the first copy is still executing): never run Phase B twice.
+            logger.warning(
+                "directory_sync_skipped_not_owner",
+                extra={"run_id": str(run_id)},
+            )
+            return "skipped"
+        db.commit()  # persist the claim before any mirror write
 
     # --- Phase B: mirror data (single transaction, rolls back on failure) ---
     started_at = datetime.now(UTC)
@@ -163,18 +194,44 @@ def execute_sync(
         "marked_missing": 0,
     }
     failure: _CategoryFailure | None = None
+    # Renew the lease in the background: one stage can outlast it (large
+    # paged categories), and the reaper must never mistake a healthy
+    # long-running worker for a crashed one.
+    heartbeat = LeaseHeartbeat(session_factory, run_id, token)
+    heartbeat.start()
     try:
+        # Fresh ownership proof immediately before the first mirror write.
+        with session_factory() as db:
+            if not extend_lease(db, run_id, token):
+                logger.warning(
+                    "directory_sync_skipped_ownership_lost",
+                    extra={"run_id": str(run_id)},
+                )
+                return "skipped"
         with session_factory() as db:
             row = db.get(DirectoryConnection, connection_id)
             if row is None:
                 return "skipped"  # connection deleted while queued
             _run_pipeline(db, row, results, counters)
-            # Explicit commit: a Session used as a context manager only
-            # CLOSES on exit (rolling back), so the mirror must be
-            # persisted here. Any _CategoryFailure raised inside
-            # _run_pipeline propagates BEFORE this line, so the session
-            # closes without commit, rolling back every mirror write.
+            # Ownership gate ATOMIC with the commit: an expired or
+            # revoked worker fails this UPDATE, raises, and the Session
+            # context manager rolls back every mirror write. The explicit
+            # commit below is required because the context manager only
+            # CLOSES on exit (rolling back); any _CategoryFailure raised
+            # inside _run_pipeline propagates BEFORE this line for the
+            # same rollback reason.
+            if not extend_lease(db, run_id, token):
+                raise OwnershipLostError()
             db.commit()
+    except OwnershipLostError:
+        # Lease expired or another owner took over: stop without
+        # touching mirror data AND without writing run status (Phase C
+        # must not run for a worker that no longer owns the run).
+        logger.warning(
+            "directory_sync_abandoned_ownership_lost",
+            extra={"run_id": str(run_id)},
+        )
+        return "skipped"
     except _CategoryFailure as cf:
         failure = cf
         results[cf.category] = {
@@ -218,27 +275,36 @@ def execute_sync(
         counters["created"] = 0
         counters["updated"] = 0
         counters["marked_missing"] = 0
+    finally:
+        heartbeat.stop()
 
-    # --- Phase C: bookkeeping + audit (always commits) ----------------------
+    # --- Phase C: bookkeeping + audit (only while still the live owner) -----
     final_status = SYNC_SUCCESS if failure is None else SYNC_FAILED
     finished_at = datetime.now(UTC)
     duration_ms = int((finished_at - started_at).total_seconds() * 1000)
+    values: dict[str, Any] = {
+        "status": final_status,
+        "finished_at": finished_at,
+        "duration_ms": duration_ms,
+        "category_results": results,
+        "objects_discovered": counters["discovered"],
+        "objects_created": counters["created"],
+        "objects_updated": counters["updated"],
+        "objects_marked_missing": counters["marked_missing"],
+        "errors": [error_entry(failure.category, failure.cause)] if failure else None,
+    }
     with session_factory() as db:
-        run = db.get(DirectorySyncRun, run_id)
-        if run is None:
-            return "skipped"  # deleted mid-run (cascade)
-        row = db.get(DirectoryConnection, run.connection_id)
-        run.status = final_status
-        run.finished_at = finished_at
-        run.duration_ms = duration_ms
-        run.category_results = results
-        run.objects_discovered = counters["discovered"]
-        run.objects_created = counters["created"]
-        run.objects_updated = counters["updated"]
-        run.objects_marked_missing = counters["marked_missing"]
-        run.errors = (
-            [error_entry(failure.category, failure.cause)] if failure else None
-        )
+        if not finalize_if_owned(db, run_id, token, values):
+            # Ownership lost or the run was already reaped/finalized
+            # meanwhile: write NOTHING — a stale worker never overwrites a
+            # reaped (failed) run with its own outcome and never finalizes
+            # a run it no longer owns.
+            logger.warning(
+                "directory_sync_skipped_finalize_not_owner",
+                extra={"run_id": str(run_id), "status": final_status},
+            )
+            return "skipped"
+        row = db.get(DirectoryConnection, connection_id)
         detail: dict[str, Any] = {
             "connection": row.name if row else None,
             "host": row.host if row else None,

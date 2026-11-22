@@ -7,9 +7,13 @@ Security/audit rules:
 - Every mutation writes a ``directory.*`` audit event; failure-path audits
   are committed BEFORE the AppError propagates (get_db would otherwise
   roll them back).
-- ``create_sync_run`` reaps stale ``running`` rows so a crashed worker or
-  a failed task submission can never block retries forever, and the
-  partial unique index guarantees a clean 409 on concurrent triggers.
+- ``create_sync_run`` reaps only runs whose owner can no longer be
+  executing them (expired lease, never-claimed and aged past the
+  fallback threshold, or past the absolute max sync duration — see
+  services/directory/ownership.py), so a crashed worker or a failed task
+  submission can never block retries forever, while a live lease always
+  spares an actively working sync. The partial unique index guarantees a
+  clean 409 on concurrent triggers.
 """
 
 from __future__ import annotations
@@ -26,7 +30,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.celery_app import celery_app
-from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.exceptions import AppError
 from app.models import (
@@ -50,6 +53,7 @@ from app.services.directory.errors import (
     static_error,
 )
 from app.services.directory.ldap_client import DirectoryLdapClient
+from app.services.directory.ownership import find_reapable_runs
 from app.services.directory.secrets import encrypt_password
 from app.services.directory.sync_engine import failed_results, initial_category_results
 
@@ -249,22 +253,20 @@ def create_sync_run(
     actor: User | None = None,
     request: Request | None = None,
 ) -> DirectorySyncRun:
-    """Insert a ``running`` sync row, reaping stale runs first.
+    """Insert a ``running`` sync row, reaping dead runs first.
+
+    The reap is lease-aware (Phase 3.1.1): a run is collected only when
+    its lease expired (crashed/stalled worker), it was never claimed and
+    aged past the fallback threshold (lost broker delivery), or it
+    exceeded the absolute max sync duration — a live lease always spares
+    an actively working sync, however old its ``started_at`` is.
 
     Raises ``AppError(409)`` when another run is active (partial unique
     index ``uq_directory_sync_runs_running``) after rolling back this
     transaction, so concurrent triggers get a clean conflict response.
     """
-    settings = get_settings()
     now = datetime.now(UTC)
-    stale_before = now - timedelta(minutes=settings.directory_stale_run_minutes)
-    stale = db.scalars(
-        select(DirectorySyncRun).where(
-            DirectorySyncRun.connection_id == row.id,
-            DirectorySyncRun.status == SYNC_RUNNING,
-            DirectorySyncRun.started_at < stale_before,
-        )
-    ).all()
+    stale = find_reapable_runs(db, row.id)
     for run in stale:
         run.status = SYNC_FAILED
         run.finished_at = now

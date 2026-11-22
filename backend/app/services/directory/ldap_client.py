@@ -182,11 +182,21 @@ class DirectoryLdapClient:
                 receive_timeout=int(ep.search_timeout),
             )
 
-        if ep.tls_mode == "starttls":
-            # Upgrade happens BEFORE any bind/search — never a plaintext probe.
-            conn.start_tls()
-        conn.bind()
+        # Retain the connection IMMEDIATELY (Phase 3.1.1): if the
+        # StartTLS upgrade or the bind below fails, close()/unbind() must
+        # still be able to tear the socket down instead of waiting for GC.
         self._conn = conn
+        try:
+            if ep.tls_mode == "starttls":
+                # Upgrade happens BEFORE any bind/search — never a plaintext probe.
+                conn.start_tls()
+            conn.bind()
+        except BaseException:
+            # Release the socket now and re-raise the ORIGINAL error
+            # (close() suppresses unbind errors so it never masks it);
+            # callers classify the original exception as before.
+            self.close()
+            raise
 
     def root_dse(self) -> dict[str, Any]:
         """Best-effort rootDSE read.

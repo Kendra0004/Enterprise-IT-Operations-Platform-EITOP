@@ -55,6 +55,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from ldap3 import MOCK_SYNC, NONE, Connection, Server
+from ldap3.core.exceptions import LDAPBindError, LDAPStartTLSError
 
 # ---------------------------------------------------------------------------
 # Local TLS listener (real handshake, locally generated certificates)
@@ -734,6 +735,145 @@ class TestMockProtocolBehavior:
         assert attrs == {"ou": "HQ"}
         assert client.read_base("OU=Nope,DC=eitop,DC=test", ["ou"]) is None
         client.close()
+
+
+# ---------------------------------------------------------------------------
+# Connect-failure cleanup (Phase 3.1.1): unbind must always be reachable
+# ---------------------------------------------------------------------------
+
+
+class _CleanupSpyConn:
+    """Scripted connection that records unbind() and can fail on demand."""
+
+    def __init__(
+        self,
+        *,
+        bind_error: Exception | None = None,
+        start_tls_error: Exception | None = None,
+        unbind_error: Exception | None = None,
+    ) -> None:
+        self.bind_error = bind_error
+        self.start_tls_error = start_tls_error
+        self.unbind_error = unbind_error
+        self.unbind_calls = 0
+        self.bound = False
+
+    def bind(self) -> bool:
+        if self.bind_error is not None:
+            raise self.bind_error
+        self.bound = True
+        return True
+
+    def start_tls(self) -> bool:
+        if self.start_tls_error is not None:
+            raise self.start_tls_error
+        return True
+
+    def unbind(self) -> None:
+        self.unbind_calls += 1
+        self.bound = False
+        if self.unbind_error is not None:
+            raise self.unbind_error
+
+
+def _cleanup_client(
+    conn: _CleanupSpyConn,
+    *,
+    tls_mode: str = "ldaps",
+    probe_on_connect: bool = False,
+    port: int = 636,
+) -> tuple[DirectoryLdapClient, list[Any]]:
+    """Client whose connection_factory hands out ``conn``; returns the
+    factory-call log so tests can assert whether ldap3 ever built one."""
+    created: list[Any] = []
+
+    def factory(server: Any, dn: str, pw: str, ep: LdapEndpoint) -> Any:
+        created.append(conn)
+        return conn
+
+    client = DirectoryLdapClient(
+        endpoint=_endpoint(port, tls_mode=tls_mode, ca_pem=_CA_PEM),
+        bind_dn=_BIND_DN,
+        bind_password=_BIND_PASSWORD,
+        server_factory=lambda ep: object(),
+        connection_factory=factory,
+        probe_on_connect=probe_on_connect,
+    )
+    return client, created
+
+
+class TestConnectFailureCleanup:
+    """The retained ldap3 Connection must be closable on EVERY failure.
+
+    Phase 3.1.1: ``connect()`` keeps the connection from the moment it is
+    created, so a StartTLS/bind failure releases the socket via
+    ``close()``/``unbind()`` immediately instead of waiting for GC —
+    while the original error still classifies to an allowlisted label
+    (never raw exception content).
+    """
+
+    def test_bind_failure_unbinds_and_keeps_classification_sanitized(self):
+        sentinel = _BIND_PASSWORD
+        conn = _CleanupSpyConn(
+            bind_error=LDAPBindError(f"bind rejected for {_BIND_DN} pw={sentinel}")
+        )
+        client, created = _cleanup_client(conn)
+        with pytest.raises(LDAPBindError) as excinfo:
+            client.connect()
+        # The connection was retained at creation, so the failure path
+        # unbinds exactly once instead of leaking the socket to GC.
+        assert created == [conn]
+        assert conn.unbind_calls == 1
+        assert not client.connected
+        # The ORIGINAL error still classifies to the allowlisted label;
+        # callers never see the raw message (which embeds the password).
+        assert classify_error(excinfo.value) == LABEL_INVALID_CREDENTIALS
+        assert sentinel not in message_for(LABEL_INVALID_CREDENTIALS)
+        # close() after the failed connect is a safe no-op.
+        client.close()
+        assert conn.unbind_calls == 1
+
+    def test_starttls_failure_unbinds_and_classifies_as_tls(self):
+        conn = _CleanupSpyConn(
+            start_tls_error=LDAPStartTLSError("upgrade refused by server")
+        )
+        client, created = _cleanup_client(conn, tls_mode="starttls")
+        with pytest.raises(LDAPStartTLSError) as excinfo:
+            client.connect()
+        assert created == [conn]
+        assert conn.unbind_calls == 1
+        assert not client.connected
+        assert classify_error(excinfo.value) == LABEL_TLS
+        client.close()
+        assert conn.unbind_calls == 1
+
+    def test_unbind_error_never_masks_the_original_failure(self):
+        conn = _CleanupSpyConn(
+            bind_error=LDAPBindError("bind rejected"),
+            unbind_error=OSError("socket already gone"),
+        )
+        client, _created = _cleanup_client(conn)
+        with pytest.raises(LDAPBindError):
+            client.connect()  # unbind() raised too, but the bind error wins
+        assert conn.unbind_calls == 1  # unbind WAS attempted
+        assert not client.connected
+
+    def test_probe_failure_creates_no_connection_and_close_is_safe(self):
+        # Refused port: the pre-flight probe fails before ldap3 ever
+        # builds a Connection — close() must still be a harmless no-op.
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()  # nothing listens here now
+        conn = _CleanupSpyConn()
+        client, created = _cleanup_client(conn, probe_on_connect=True, port=port)
+        with pytest.raises(OSError) as excinfo:
+            client.connect()
+        assert created == []
+        assert not client.connected
+        assert classify_error(excinfo.value) == LABEL_CONNECTION
+        client.close()
+        assert conn.unbind_calls == 0
 
 
 # ---------------------------------------------------------------------------

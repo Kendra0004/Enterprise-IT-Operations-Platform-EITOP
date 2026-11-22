@@ -361,6 +361,13 @@ class DirectorySyncRun(Base):
     raw exception content, credentials, or directory attribute payloads.
     A partial unique index guarantees at most one ``running`` row per
     connection (single-flight at the database level).
+
+    Ownership (Phase 3.1.1): ``execution_token`` + ``lease_expires_at``
+    record which worker currently owns the run. The executing worker
+    claims the row atomically (one live owner), renews the lease while it
+    works, and may only write mirror data or finalize ``status`` while the
+    claim still holds — duplicate deliveries and stale workers return
+    without touching data or run status. See services/directory/ownership.
     """
 
     __tablename__ = "directory_sync_runs"
@@ -392,6 +399,13 @@ class DirectorySyncRun(Base):
     )
     status: Mapped[str] = mapped_column(String(16), default=SYNC_RUNNING)
     trigger: Mapped[str] = mapped_column(String(16), default=SYNC_TRIGGER_MANUAL)
+    # Ownership claim: set atomically by the executing worker (NULL until
+    # claimed); the lease is renewed by its heartbeat and gates every
+    # mirror commit / status finalization (Phase 3.1.1).
+    execution_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     objects_discovered: Mapped[int] = mapped_column(Integer, default=0)
     objects_created: Mapped[int] = mapped_column(Integer, default=0)
     objects_updated: Mapped[int] = mapped_column(Integer, default=0)

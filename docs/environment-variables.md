@@ -44,6 +44,39 @@ All configuration is environment-driven. Copy `.env.example` → `.env`.
 See [endpoints/heartbeat.md](endpoints/heartbeat.md) and
 [endpoints/inventory-history.md](endpoints/inventory-history.md).
 
+## Active Directory integration (Phase 3.1)
+
+Read-only AD mirror: LDAPS/StartTLS only (`ldap3`), no write operations
+against the directory, sanitized error labels only (never raw exceptions
+or credentials).
+
+| Variable | Default | Description |
+|---|---|---|
+| `DIRECTORY_SYNC_SCAN_SECONDS` | `300` | Celery beat cadence scanning for due auto-sync connections (per-connection cadence is `sync_interval_minutes` on the connection row; min 30) |
+| `DIRECTORY_CONNECT_TIMEOUT_SECONDS` | `10` | LDAP connect/bind budget per operation (1–120) |
+| `DIRECTORY_SEARCH_TIMEOUT_SECONDS` | `30` | LDAP search/page-read budget per operation (1–600) |
+| `DIRECTORY_PAGE_SIZE` | `500` | Paged-search page size (1–5000) |
+| `DIRECTORY_MISSING_GRACE_DAYS` | `7` | Grace period before a never-seen-again object is marked missing (1–90) |
+| `DIRECTORY_STALE_RUN_MINUTES` | `30` | Fallback reaper threshold for runs **never claimed** (lost broker delivery, pre-lease rows). Runs holding a live lease are never reaped by age alone (5–1440) |
+| `DIRECTORY_MAX_SYNC_MINUTES` | `60` | Absolute wall-clock cap for ONE sync run, enforced by the reaper even while the lease is live; also sizes the Celery ladder below. Must be ≥ `DIRECTORY_STALE_RUN_MINUTES` (validator) |
+| `DIRECTORY_SYNC_LEASE_SECONDS` | `300` | Ownership lease of the executing worker; renewed by a heartbeat thread every lease/3 and re-checked atomically before each mirror commit and before finalizing run status (30–3600) |
+
+### Runtime limits ladder
+
+One consistent ladder, sized from `DIRECTORY_MAX_SYNC_MINUTES` (see
+`app/core/celery_app.py`):
+
+| Bound | Value | Purpose |
+|---|---|---|
+| DB hard cap | `DIRECTORY_MAX_SYNC_MINUTES` | Reaper collects the run even if its lease is live |
+| Celery `task_soft_time_limit` | `DIRECTORY_MAX_SYNC_MINUTES × 60` s (from task start) | Graceful failure → run finalized as failed |
+| Celery `task_time_limit` | soft + 60 s | Hard worker kill |
+| Broker `visibility_timeout` | `DIRECTORY_MAX_SYNC_MINUTES + 15` min | Redis unacked-redelivery window; must stay above `task_time_limit` so a live task is never delivered twice |
+
+Duplicate deliveries are harmless regardless of the ladder: the second
+worker loses the execution-token claim and returns `skipped` without
+touching data or run status.
+
 ## Bootstrap (optional)
 
 | Variable | Description |

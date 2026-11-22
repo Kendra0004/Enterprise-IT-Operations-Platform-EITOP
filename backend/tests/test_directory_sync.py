@@ -13,16 +13,24 @@ Invariants exercised here:
 - keyed upserts + unique edges: re-runs never duplicate rows;
 - category_results/errors carry sanitized labels only (no exception text,
   no credentials, no directory attribute payloads);
-- stale-run reaping, concurrent-trigger 409, enqueue-failure finalization.
+- stale-run reaping, concurrent-trigger 409, enqueue-failure finalization;
+- single live owner per run (Phase 3.1.1): execution-token claim before
+  any write, lease gates atomic with the mirror commit and with status
+  finalization, duplicate deliveries skip, the reaper spares live leases,
+  and a membership rebuild that fails after its DELETE rolls back to the
+  original edge set.
 """
 
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from app.core.config import get_settings
+from app.core.database import SessionLocal
 from app.models import (
     SYNC_FAILED,
     SYNC_RUNNING,
@@ -39,10 +47,11 @@ from app.models import (
     DirectoryUser,
     Endpoint,
 )
-from app.services.directory import connection_service
+from app.services.directory import connection_service, sync_engine
 from app.services.directory import factory as factory_module
 from app.services.directory.connection_service import create_sync_run, trigger_sync
 from app.services.directory.ldap_client import DirectoryLdapClient
+from app.services.directory.ownership import LeaseHeartbeat, claim_run
 from app.services.directory.sync_engine import execute_sync, initial_category_results
 from ldap3 import MOCK_SYNC, NONE, Connection, Server
 from sqlalchemy import delete, select, update
@@ -381,6 +390,24 @@ def _count(db, model, connection_row) -> int:
     )
 
 
+def _membership_edges(db, connection_row) -> set[tuple]:
+    """Exact current edge set: (group guid, member dn, type, member guid)."""
+    rows = db.execute(
+        select(
+            DirectoryGroup.object_guid,
+            DirectoryGroupMembership.member_dn,
+            DirectoryGroupMembership.member_type,
+            DirectoryGroupMembership.member_object_guid,
+        )
+        .join(
+            DirectoryGroup,
+            DirectoryGroup.id == DirectoryGroupMembership.group_id,
+        )
+        .where(DirectoryGroupMembership.connection_id == connection_row.id)
+    ).all()
+    return {tuple(row) for row in rows}
+
+
 # ---------------------------------------------------------------------------
 # Happy path + idempotency
 # ---------------------------------------------------------------------------
@@ -527,10 +554,12 @@ def test_repeated_syncs_never_duplicate_rows(db, connection, monkeypatch):
     } == first_counts
 
     runs = db.scalars(
-        select(DirectorySyncRun).where(
+        select(DirectorySyncRun)
+        .where(
             DirectorySyncRun.connection_id == connection.id,
             DirectorySyncRun.status == SYNC_SUCCESS,
         )
+        .order_by(DirectorySyncRun.started_at)  # deterministic execution order
     ).all()
     assert len(runs) == 3
     # Runs 2 and 3 update existing rows instead of creating them.
@@ -1055,3 +1084,372 @@ def test_run_for_deleted_connection_is_skipped(db, connection, monkeypatch):
     db.delete(connection)
     db.commit()
     assert execute_sync(run.id) == "skipped"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.1.1: execution-token ownership, lease gates, rebuild rollback
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_delivery_cannot_run_phase_b_twice(db, connection, monkeypatch):
+    """A second delivery of the same task must lose the ownership claim."""
+    _patch_client(monkeypatch, _base_entries())
+    run = _start_run(db, connection)
+
+    real_computers = sync_engine._sync_computers
+    nested: list[str] = []
+
+    def computers_then_duplicate(*args, **kwargs):
+        # The SAME run id arrives again while this worker is mid-Phase-B.
+        nested.append(execute_sync(run.id))
+        return real_computers(*args, **kwargs)
+
+    monkeypatch.setattr(sync_engine, "_sync_computers", computers_then_duplicate)
+
+    assert execute_sync(run.id) == SYNC_SUCCESS
+    assert nested == ["skipped"]  # claim lost -> Phase B never runs twice
+
+    run_row = _last_run(db)
+    assert run_row.status == SYNC_SUCCESS
+    assert run_row.category_results["computers"]["status"] == "success"
+    # Exactly one finalization + one audit: the duplicate wrote nothing.
+    audits = db.scalars(
+        select(AuditLog).where(
+            AuditLog.target == str(run.id),
+            AuditLog.event_type == "directory.sync.succeeded",
+        )
+    ).all()
+    assert len(audits) == 1
+
+
+def test_expired_lease_aborts_before_commit_and_leaves_run_untouched(
+    db, connection, monkeypatch
+):
+    """A worker whose lease lapsed mid-run rolls back and stays silent."""
+    _patch_client(monkeypatch, _base_entries())
+    assert _run_sync(db, connection) == SYNC_SUCCESS
+    assert _count(db, DirectoryUser, connection) == 2
+
+    # The next attempt sees an EXTRA user: if the aborted run leaked any
+    # mirror write, carol would exist afterwards.
+    extra = _base_entries()
+    extra.append(
+        {
+            "dn": "CN=carol,OU=IT," + SEARCH_BASE,
+            "attributes": {
+                "objectClass": ["top", "person", "organizationalPerson", "user"],
+                "objectCategory": "person",
+                "objectGUID": str(uuid.uuid4()),
+                "sAMAccountName": "carol",
+                "userAccountControl": "512",
+            },
+        }
+    )
+    _patch_client(monkeypatch, extra)
+
+    run = _start_run(db, connection)
+    real_computers = sync_engine._sync_computers
+
+    def expire_lease_then_continue(*args, **kwargs):
+        # The lease lapses while this worker is mid-stage (its heartbeat
+        # thread died). Committed from a SEPARATE session so the worker's
+        # transaction observes it at the pre-commit gate.
+        db.execute(
+            update(DirectorySyncRun)
+            .where(DirectorySyncRun.id == run.id)
+            .values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=5))
+        )
+        db.commit()
+        return real_computers(*args, **kwargs)
+
+    monkeypatch.setattr(sync_engine, "_sync_computers", expire_lease_then_continue)
+
+    assert execute_sync(run.id) == "skipped"
+
+    db.expire_all()
+    row = db.get(DirectorySyncRun, run.id)
+    # The stale worker wrote NO run status ...
+    assert row.status == SYNC_RUNNING
+    assert row.finished_at is None
+    assert row.errors is None
+    assert row.category_results == initial_category_results()
+    # ... NO mirror data survived the rollback (carol must not exist) ...
+    assert _count(db, DirectoryUser, connection) == 2
+    # ... and NO audit event.
+    assert (
+        len(db.scalars(select(AuditLog).where(AuditLog.target == str(run.id))).all())
+        == 0
+    )
+
+
+def test_reaper_spares_live_lease_even_past_stale_threshold(db, connection):
+    """Age alone never reaps a claimed run whose lease is still live."""
+    settings = get_settings()
+    age_minutes = min(
+        settings.directory_stale_run_minutes + 1,
+        settings.directory_max_sync_minutes - 1,
+    )
+    run = DirectorySyncRun(
+        connection_id=connection.id,
+        trigger="manual",
+        status=SYNC_RUNNING,
+        category_results=initial_category_results(),
+    )
+    # Older than the fallback stale threshold, within the absolute cap.
+    run.started_at = datetime.now(UTC) - timedelta(minutes=age_minutes)
+    run.execution_token = "worker-alive"
+    run.lease_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+    db.add(run)
+    db.commit()
+
+    with pytest.raises(Exception) as excinfo:
+        create_sync_run(db, connection, trigger="manual")
+    # NOT reaped: the partial unique index rejected the second run.
+    assert getattr(excinfo.value, "status", None) == 409
+
+    db.expire_all()
+    row = db.get(DirectorySyncRun, run.id)
+    assert row.status == SYNC_RUNNING
+    assert row.execution_token == "worker-alive"
+    # The spared run was not audited as failed either.
+    assert (
+        db.scalars(select(AuditLog).where(AuditLog.target == str(run.id))).all() == []
+    )
+
+
+def test_reaper_reaps_expired_lease_even_when_run_is_young(db, connection):
+    """A crashed worker is recovered on the next trigger, not after 30 min."""
+    run = DirectorySyncRun(
+        connection_id=connection.id,
+        trigger="manual",
+        status=SYNC_RUNNING,
+        category_results=initial_category_results(),
+    )
+    run.started_at = datetime.now(UTC) - timedelta(minutes=1)  # young
+    run.execution_token = "crashed-worker"
+    run.lease_expires_at = datetime.now(UTC) - timedelta(seconds=30)
+    db.add(run)
+    db.commit()
+
+    new_run = create_sync_run(db, connection, trigger="manual")
+    db.commit()
+
+    db.expire_all()
+    old = db.get(DirectorySyncRun, run.id)
+    assert old is not None
+    assert old.status == SYNC_FAILED
+    assert old.finished_at is not None
+    assert old.errors == [
+        {"category": "connect", "label": "stale_run_reaped", "error_count": 1}
+    ]
+    assert new_run.status == SYNC_RUNNING
+    assert new_run.id != run.id
+
+
+def test_reaper_enforces_absolute_max_duration_despite_live_lease(db, connection):
+    """The hard cap bounds even a heartbeating worker's run wall-time."""
+    settings = get_settings()
+    run = DirectorySyncRun(
+        connection_id=connection.id,
+        trigger="manual",
+        status=SYNC_RUNNING,
+        category_results=initial_category_results(),
+    )
+    run.started_at = datetime.now(UTC) - timedelta(
+        minutes=settings.directory_max_sync_minutes + 5
+    )
+    run.execution_token = "worker-still-heartbeating"
+    run.lease_expires_at = datetime.now(UTC) + timedelta(minutes=5)  # LIVE lease
+    db.add(run)
+    db.commit()
+
+    new_run = create_sync_run(db, connection, trigger="manual")
+    db.commit()
+
+    db.expire_all()
+    old = db.get(DirectorySyncRun, run.id)
+    assert old is not None
+    assert old.status == SYNC_FAILED
+    assert old.errors == [
+        {"category": "connect", "label": "stale_run_reaped", "error_count": 1}
+    ]
+    assert new_run.id != run.id
+
+
+def test_stale_worker_never_overwrites_reaped_run_status(db, connection, monkeypatch):
+    """Phase C is conditional: failed-by-reaper stays failed, verbatim."""
+    _patch_client(monkeypatch, _base_entries())
+    run = _start_run(db, connection)
+
+    def reap_then_fail(*args, **kwargs):
+        # The lease lapses and the next trigger's reaper wins the race:
+        # it marks our run failed and starts a successor run ...
+        db.execute(
+            update(DirectorySyncRun)
+            .where(DirectorySyncRun.id == run.id)
+            .values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=10))
+        )
+        db.commit()
+        create_sync_run(db, connection, trigger="manual")
+        db.commit()
+        # ... then this worker's stage fails; its own error must not land.
+        raise RuntimeError("directory read failed after ownership loss")
+
+    monkeypatch.setattr(sync_engine, "_sync_computers", reap_then_fail)
+
+    assert execute_sync(run.id) == "skipped"
+
+    db.expire_all()
+    old = db.get(DirectorySyncRun, run.id)
+    assert old.status == SYNC_FAILED  # never flipped to success
+    assert old.finished_at is not None
+    assert old.errors == [
+        {"category": "connect", "label": "stale_run_reaped", "error_count": 1}
+    ]
+    assert old.category_results["connect"] == {
+        "status": "failed",
+        "label": "stale_run_reaped",
+    }
+    # The worker's own failure label never overwrote the reaper's verdict.
+    assert "unexpected" not in str(old.category_results)
+    # Exactly ONE audit for this run — the reaper's, never the worker's.
+    audits = db.scalars(
+        select(AuditLog).where(AuditLog.target == str(run.id))
+    ).all()
+    assert [a.event_type for a in audits] == ["directory.sync.failed"]
+    # The successor run is untouched (still unclaimed by anyone).
+    successors = db.scalars(
+        select(DirectorySyncRun).where(
+            DirectorySyncRun.connection_id == connection.id,
+            DirectorySyncRun.id != run.id,
+        )
+    ).all()
+    assert len(successors) == 1
+    assert successors[0].status == SYNC_RUNNING
+    assert successors[0].execution_token is None
+
+
+def test_expired_worker_writes_no_run_status_on_failure(db, connection, monkeypatch):
+    """An expired lease blocks even the failure bookkeeping (Phase C)."""
+    _patch_client(monkeypatch, _base_entries())
+    run = _start_run(db, connection)
+
+    def expire_then_fail(*args, **kwargs):
+        db.execute(
+            update(DirectorySyncRun)
+            .where(DirectorySyncRun.id == run.id)
+            .values(lease_expires_at=datetime.now(UTC) - timedelta(seconds=10))
+        )
+        db.commit()
+        raise RuntimeError("read failed after the lease lapsed")
+
+    monkeypatch.setattr(sync_engine, "_sync_computers", expire_then_fail)
+
+    assert execute_sync(run.id) == "skipped"
+
+    db.expire_all()
+    row = db.get(DirectorySyncRun, run.id)
+    # The run stays 'running' — only the lease-aware reaper may finish it.
+    assert row.status == SYNC_RUNNING
+    assert row.finished_at is None
+    assert row.errors is None
+    assert row.category_results == initial_category_results()
+    assert (
+        len(db.scalars(select(AuditLog).where(AuditLog.target == str(run.id))).all())
+        == 0
+    )
+
+
+def test_membership_rebuild_rolls_back_completely_on_late_failure(
+    db, connection, monkeypatch
+):
+    """DELETE + partial re-insert + failure before commit -> originals.
+
+    The membership stage executes its wholesale DELETE and inserts the
+    first batch of REPLACEMENT edges, then a later stage-level failure
+    forces the rollback: the previously committed edge set must survive
+    exactly, with no partial replacements left behind.
+    """
+    # Baseline: committed membership edges.
+    _patch_client(monkeypatch, _base_entries())
+    assert _run_sync(db, connection) == SYNC_SUCCESS
+    original = _membership_edges(db, connection)
+    assert len(original) == 3
+
+    # The directory now reports DIFFERENT memberships: replacements that
+    # differ from the originals (Team-All loses alice+foreign, Team-Empty
+    # gains alice).
+    changed = _base_entries()
+    for entry in changed:
+        if entry["dn"] == "CN=Team-All,OU=IT," + SEARCH_BASE:
+            entry["attributes"] = {**entry["attributes"], "member": [BOB_DN]}
+        elif entry["dn"] == "CN=Team-Empty,OU=Sales," + SEARCH_BASE:
+            entry["attributes"] = {**entry["attributes"], "member": [ALICE_DN]}
+    _patch_client(monkeypatch, changed)
+
+    # Force the failure INSIDE the membership stage, after the wholesale
+    # DELETE and the first replacement flush, but before the commit:
+    # flush one group at a time, then fail on the second resolution.
+    monkeypatch.setattr(sync_engine, "_UPSERT_CHUNK", 1)
+    real_resolve = sync_engine._resolve_members
+    calls = {"n": 0}
+
+    def resolve_then_fail(db_, connection_id, dns):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise RuntimeError("simulated failure mid-membership-rebuild")
+        return real_resolve(db_, connection_id, dns)
+
+    monkeypatch.setattr(sync_engine, "_resolve_members", resolve_then_fail)
+
+    assert _run_sync(db, connection) == SYNC_FAILED
+    assert calls["n"] == 2  # the failure really fired mid-rebuild
+
+    run = _last_run(db)
+    assert run.status == SYNC_FAILED
+    memberships = run.category_results["memberships"]
+    assert memberships["status"] == "failed"
+    assert memberships["label"] == "unexpected"
+    assert memberships["error_type"] == "RuntimeError"
+    assert run.category_results["missing_scan"]["status"] == "skipped"
+    assert run.category_results["reconcile"]["status"] == "skipped"
+
+    # Single transaction: the DELETE and every partial replacement were
+    # rolled back — the ORIGINAL edge set survives exactly: no partial
+    # replacements, nothing resurrected from the deleted set.
+    assert _membership_edges(db, connection) == original
+
+
+def test_lease_heartbeat_renews_until_ownership_is_lost(db, connection):
+    """The heartbeat keeps the lease fresh until the token isn't ours."""
+    run = _start_run(db, connection)
+    token = "heartbeat-token"
+    assert claim_run(db, run.id, token)
+    db.commit()
+    db.expire_all()
+    claimed = db.get(DirectorySyncRun, run.id).lease_expires_at
+    assert claimed is not None
+
+    heartbeat = LeaseHeartbeat(SessionLocal, run.id, token, interval=0.05)
+    heartbeat.start()
+    try:
+        time.sleep(0.4)
+        db.expire_all()
+        renewed = db.get(DirectorySyncRun, run.id).lease_expires_at
+        # Renewed while the worker was "working": the deadline moved on.
+        assert renewed is not None and renewed > claimed
+
+        # Another worker takes over: renewal must stop immediately.
+        db.execute(
+            update(DirectorySyncRun)
+            .where(DirectorySyncRun.id == run.id)
+            .values(execution_token="other-worker")
+        )
+        db.commit()
+        db.expire_all()
+        revoked = db.get(DirectorySyncRun, run.id).lease_expires_at
+        time.sleep(0.2)
+        db.expire_all()
+        assert db.get(DirectorySyncRun, run.id).lease_expires_at == revoked
+    finally:
+        heartbeat.stop()
