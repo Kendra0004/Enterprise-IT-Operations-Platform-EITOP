@@ -86,6 +86,59 @@ RECON_STATUSES = (
     RECON_REJECTED,
 )
 
+# Directory findings (Phase 3.2.1) — status/severity/subject lifecycle.
+FINDING_OPEN = "open"
+FINDING_ACKNOWLEDGED = "acknowledged"
+FINDING_SUPPRESSED = "suppressed"
+FINDING_RESOLVED = "resolved"
+FINDING_STATUSES = (
+    FINDING_OPEN,
+    FINDING_ACKNOWLEDGED,
+    FINDING_SUPPRESSED,
+    FINDING_RESOLVED,
+)
+
+SEVERITY_INFO = "info"
+SEVERITY_LOW = "low"
+SEVERITY_MEDIUM = "medium"
+SEVERITY_HIGH = "high"
+SEVERITY_CRITICAL = "critical"
+FINDING_SEVERITIES = (
+    SEVERITY_INFO,
+    SEVERITY_LOW,
+    SEVERITY_MEDIUM,
+    SEVERITY_HIGH,
+    SEVERITY_CRITICAL,
+)
+
+# ``unknown`` covers foreign security principals and any member not present
+# in the local mirror — typed honestly instead of guessed.
+FINDING_SUBJECT_USER = "user"
+FINDING_SUBJECT_GROUP = "group"
+FINDING_SUBJECT_COMPUTER = "computer"
+FINDING_SUBJECT_UNKNOWN = "unknown"
+FINDING_SUBJECT_CONNECTION = "connection"
+FINDING_SUBJECT_TYPES = (
+    FINDING_SUBJECT_USER,
+    FINDING_SUBJECT_GROUP,
+    FINDING_SUBJECT_COMPUTER,
+    FINDING_SUBJECT_UNKNOWN,
+    FINDING_SUBJECT_CONNECTION,
+)
+
+ACCESS_DIRECT = "direct"
+ACCESS_TRANSITIVE = "transitive"
+FINDING_ACCESSES = (ACCESS_DIRECT, ACCESS_TRANSITIVE)
+
+# Connection-level effective-privilege visibility verdict (per evaluation):
+#   full         — inventory complete, graph fully resolvable;
+#   partial      — complete inventory but unresolved/untyped graph parts;
+#   insufficient — the NEWEST sync run does not prove a complete inventory.
+VISIBILITY_FULL = "full"
+VISIBILITY_PARTIAL = "partial"
+VISIBILITY_INSUFFICIENT = "insufficient"
+FINDING_VISIBILITIES = (VISIBILITY_FULL, VISIBILITY_PARTIAL, VISIBILITY_INSUFFICIENT)
+
 
 def _uuid_pk() -> Mapped[uuid.UUID]:
     return mapped_column(primary_key=True, default=uuid.uuid4)
@@ -464,6 +517,101 @@ class DirectoryReconciliation(Base):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
+class DirectoryFinding(Base):
+    """Security finding derived from the read-only mirror (Phase 3.2.1).
+
+    App-generated analytics — never written to Active Directory, never
+    derived from anything but mirror rows.
+
+    Lifecycle (recomputed by services.directory.insights):
+    - created ``open``; refreshed while the condition holds (``first_seen_at``
+      immutable, ``last_seen_at`` updated);
+    - auto-resolved ONLY when the condition disappears AND the newest sync
+      run proves a complete inventory;
+    - recurrence reopens in place: ``status=open``, ``resolved_at`` cleared,
+      ``first_seen_at`` preserved, ``reopen_count`` incremented (audited);
+    - ``suppressed`` is terminal for recomputation — never refreshed,
+      resolved or reopened automatically (manual transitions only);
+    - system transitions (resolve/reopen) append an audit_logs row.
+
+    ``subject_dn`` is NULL iff ``subject_type='connection'`` (CHECK below);
+    every object-level finding must carry its DN as stable identity.
+    """
+
+    __tablename__ = "directory_findings"
+    __table_args__ = (
+        CheckConstraint(
+            "severity IN ('info','low','medium','high','critical')",
+            name="ck_directory_findings_severity",
+        ),
+        CheckConstraint(
+            "status IN ('open','acknowledged','suppressed','resolved')",
+            name="ck_directory_findings_status",
+        ),
+        CheckConstraint(
+            "subject_type IN ('user','group','computer','unknown','connection')",
+            name="ck_directory_findings_subject_type",
+        ),
+        CheckConstraint(
+            "access IS NULL OR access IN ('direct','transitive')",
+            name="ck_directory_findings_access",
+        ),
+        CheckConstraint(
+            "(subject_type = 'connection' AND subject_dn IS NULL "
+            "AND subject_guid IS NULL) "
+            "OR (subject_type <> 'connection' AND subject_dn IS NOT NULL)",
+            name="ck_directory_findings_subject",
+        ),
+        UniqueConstraint(
+            "connection_id", "fingerprint", name="uq_directory_findings_conn_fp"
+        ),
+        Index("ix_directory_findings_conn_status", "connection_id", "status"),
+        Index("ix_directory_findings_conn_severity", "connection_id", "severity"),
+        Index("ix_directory_findings_rule", "rule_key"),
+        Index("ix_directory_findings_subject", "subject_guid"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("directory_connections.id", ondelete="CASCADE")
+    )
+    # Deterministic bounded identity: rule + member/group keys (objectGUID
+    # when available, otherwise sha256(lower DN) — long DNs are hashed,
+    # never truncated). Path-independent: nested routes collapse to one row.
+    fingerprint: Mapped[str] = mapped_column(String(160))
+    rule_key: Mapped[str] = mapped_column(String(64))
+    severity: Mapped[str] = mapped_column(String(8))
+    status: Mapped[str] = mapped_column(String(16), default=FINDING_OPEN)
+    subject_type: Mapped[str] = mapped_column(String(16))
+    access: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    subject_guid: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    subject_dn: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    subject_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    title: Mapped[str] = mapped_column(String(255))
+    # Evidence: mirror metadata only (names, DNs, counts, timestamps,
+    # visibility verdict) — never credentials, never raw exception content.
+    detail: Mapped[dict] = mapped_column(JSONB, default=dict)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reopen_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    acknowledged_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    acknowledged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    suppressed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

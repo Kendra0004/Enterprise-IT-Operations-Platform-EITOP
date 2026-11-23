@@ -22,6 +22,11 @@ Phase 3.1:
   its DB lease ladder indefinitely.
 - ``directory_sync_tick`` — beat-driven enqueue of due scheduled syncs.
 
+Phase 3.2.1:
+- ``directory_insights_tick`` — beat-driven recompute of directory
+  findings for every enabled connection (per-connection advisory lock;
+  a colliding tick skips with zero writes).
+
 No FastAPI request handler ever polls the database for health state.
 """
 
@@ -108,7 +113,39 @@ def directory_sync_tick() -> int:
     return enqueue_due_syncs()
 
 
+@celery_app.task(name="eitop.directory_insights_tick")
+def directory_insights_tick() -> int:
+    """Beat task: recompute directory findings for every enabled
+    connection (Phase 3.2.1).
+
+    Returns the number of connections recomputed (lock-skipped ones do
+    not count). Each connection runs in its own session/transaction
+    under the per-connection advisory lock, so a collision between this
+    tick and another writer skips cleanly with zero writes instead of
+    blocking or duplicating work.
+    """
+    from app.models import DirectoryConnection
+    from app.services.directory.insights import recompute_connection
+
+    with session_scope() as db:
+        connection_ids = list(
+            db.scalars(
+                select(DirectoryConnection.id).where(
+                    DirectoryConnection.enabled.is_(True)
+                )
+            )
+        )
+    done = 0
+    for connection_id in connection_ids:
+        with session_scope() as db:
+            result = recompute_connection(db, connection_id)
+        if not result.get("skipped"):
+            done += 1
+    return done
+
+
 __all__ = [
+    "directory_insights_tick",
     "directory_sync_tick",
     "prune_endpoint_snapshots",
     "scan_endpoint_offline",

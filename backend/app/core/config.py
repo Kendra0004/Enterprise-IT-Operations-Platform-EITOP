@@ -86,6 +86,19 @@ class Settings(BaseSettings):
     # (so several renewals fit) and comfortably above the heartbeat tick.
     directory_sync_lease_seconds: int = Field(default=300, ge=30, le=3600)
 
+    # --- Directory insights (Phase 3.2.1) -----------------------------------
+    # Beat cadence of the findings recompute (idempotent, advisory-locked
+    # per connection — a tick that collides with another skips cleanly).
+    directory_insight_scan_seconds: int = Field(default=600, ge=60)
+    # Inactivity thresholds. Both are >= 30 days because AD's replicated
+    # lastLogonTimestamp has ~14-day resolution — a shorter window would
+    # produce false "inactive" findings inside the replication error band.
+    directory_inactive_user_days: int = Field(default=90, ge=30, le=3650)
+    directory_stale_computer_days: int = Field(default=90, ge=30, le=3650)
+    # Bounded transitive (nested-group) traversal: chain depth from a
+    # privileged group. Cycle detection + a node budget bound the walk too.
+    directory_nested_group_max_depth: int = Field(default=8, ge=1, le=32)
+
     @field_validator("app_env")
     @classmethod
     def _known_env(cls, v: str) -> str:

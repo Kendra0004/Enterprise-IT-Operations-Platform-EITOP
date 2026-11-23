@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # --- Connections -------------------------------------------------------------
 
@@ -315,6 +315,64 @@ class DirectoryOverviewOut(BaseModel):
     last_sync_failure_at: datetime | None = None
 
 
+# --- Findings (Phase 3.2.1) ---------------------------------------------------
+
+
+class FindingOut(BaseModel):
+    """One finding with evidence. ``detail`` is mirror metadata only."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    connection_id: uuid.UUID
+    fingerprint: str
+    rule_key: str
+    severity: str
+    status: str
+    subject_type: str
+    access: str | None = None
+    subject_guid: str | None = None
+    subject_dn: str | None = None
+    subject_name: str | None = None
+    title: str
+    detail: dict[str, Any] = Field(default_factory=dict)
+    first_seen_at: datetime
+    last_seen_at: datetime
+    resolved_at: datetime | None = None
+    reopen_count: int = 0
+    acknowledged_at: datetime | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def _subject_identity(self) -> FindingOut:
+        # Connection findings identify via connection_id alone; object
+        # findings must carry their DN (DB CHECK mirrors this rule).
+        if self.subject_type == "connection":
+            if self.subject_dn is not None or self.subject_guid is not None:
+                raise ValueError(
+                    "connection findings must not carry subject_dn/subject_guid"
+                )
+        elif self.subject_dn is None:
+            raise ValueError("object findings require subject_dn")
+        return self
+
+
+class FindingSummaryOut(BaseModel):
+    """Findings rollup: counts + the effective-privilege visibility verdict."""
+
+    total: int = 0
+    open: int = 0
+    acknowledged: int = 0
+    suppressed: int = 0
+    resolved: int = 0
+    by_severity: dict[str, int] = Field(default_factory=dict)
+    by_rule: dict[str, int] = Field(default_factory=dict)
+    privilege_visibility: str
+    visibility_reasons: list[str] = Field(default_factory=list)
+    inventory_complete: bool = False
+
+
 __all__ = [
     "ConnectionCreate",
     "ConnectionOut",
@@ -328,6 +386,8 @@ __all__ = [
     "DirectoryOverviewOut",
     "DirectoryUserOut",
     "DomainOut",
+    "FindingOut",
+    "FindingSummaryOut",
     "GroupMemberOut",
     "MatchDecisionIn",
     "OrganizationalUnitDetailOut",

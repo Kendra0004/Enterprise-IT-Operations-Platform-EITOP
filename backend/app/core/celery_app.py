@@ -69,5 +69,11 @@ celery_app.conf.update(
             "task": "eitop.directory_sync_tick",
             "schedule": float(settings.directory_sync_scan_seconds),
         },
+        # Phase 3.2.1: findings recompute (idempotent, advisory-locked per
+        # connection — colliding ticks skip cleanly with zero writes).
+        "directory-insights-tick": {
+            "task": "eitop.directory_insights_tick",
+            "schedule": float(settings.directory_insight_scan_seconds),
+        },
     },
 )
