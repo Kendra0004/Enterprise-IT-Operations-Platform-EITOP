@@ -92,7 +92,7 @@ jobs:
       - name: Build backend image
         run: docker build -t eitop-backend:ci backend
       - name: Trivy scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.28.0
         with:
           image-ref: eitop-backend:ci
           format: table

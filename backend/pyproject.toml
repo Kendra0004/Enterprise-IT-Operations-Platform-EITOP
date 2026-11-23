@@ -55,6 +55,9 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Bare `pytest` (CI) does not put cwd on sys.path like `python -m pytest`
+# does; tests import `tests.conftest`, so rootdir must be importable.
+pythonpath = ["."]
 addopts = "-q --strict-markers"
 markers = [
     "integration: requires PostgreSQL + Redis running",
