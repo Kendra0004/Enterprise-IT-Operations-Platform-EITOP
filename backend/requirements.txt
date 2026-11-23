@@ -22,4 +22,4 @@ pyjwt>=2.9,<3.0
 ldap3>=2.9,<3.0
 # Fernet encryption-at-rest for directory bind passwords (Phase 3.1) —
 # keyed by the existing SECRET_KEY via HKDF (see services/directory/secrets.py).
-cryptography>=42,<46
+cryptography>=42,<51

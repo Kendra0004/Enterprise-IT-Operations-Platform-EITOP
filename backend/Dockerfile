@@ -1,6 +1,14 @@
 # Runtime image: ONLY production dependencies (no pytest/ruff/mypy).
 FROM python:3.12-slim AS runtime
 
+# Official python:3.12-slim lags Debian security updates; the container-scan
+# gate (trivy, HIGH/CRITICAL, ignore-unfixed) fails on base-image CVEs until
+# the layer below is applied. Keep narrow: only packages with fixable
+# findings, upgraded from trixie-security.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends --only-upgrade zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
 # Run as non-root
 RUN useradd --create-home --uid 10001 eitop
 
