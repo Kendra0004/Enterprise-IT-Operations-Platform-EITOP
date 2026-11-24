@@ -1,6 +1,7 @@
 /**
- * Active Directory (Phase 3.1): one page with in-page tabs —
- * Overview · Connections · Users · Groups · Computers · OUs · Sync History.
+ * Active Directory (Phase 3.1, extended 3.2.3): one page with in-page
+ * tabs — Overview · Connections · Users · Groups · Computers · OUs ·
+ * Insights · Health · Correlation Gaps · Sync History.
  *
  * Everything rendered here is read-only mirrored directory data plus the
  * connection lifecycle actions. Writes are gated on `directory:write` /
@@ -45,6 +46,9 @@ import {
 } from "../api/directory";
 import { useAuth } from "../auth/AuthContext";
 import { PageHeader } from "../components/PageHeader";
+import { FindingsTab } from "./directory/FindingsTab";
+import { GapsTab } from "./directory/GapsTab";
+import { HealthTab } from "./directory/HealthTab";
 import { SectionNav } from "../components/SectionNav";
 import { SearchInput } from "../components/SearchInput";
 import { StatCard } from "../components/StatCard";
@@ -59,6 +63,9 @@ const TABS = [
   { id: "groups", label: "Groups" },
   { id: "computers", label: "Computers" },
   { id: "ous", label: "OUs" },
+  { id: "insights", label: "Insights" },
+  { id: "health", label: "Health" },
+  { id: "gaps", label: "Correlation Gaps" },
   { id: "history", label: "Sync History" },
 ];
 
@@ -113,13 +120,32 @@ export function DirectoryPage() {
         label="Directory sections"
       />
 
-      {tab === "overview" && <OverviewSection />}
-      {tab === "connections" && <ConnectionsSection canWrite={canWrite} canSync={canSync} />}
-      {tab === "users" && <UsersSection connectionId={activeId} />}
-      {tab === "groups" && <GroupsSection connectionId={activeId} />}
-      {tab === "computers" && <ComputersSection connectionId={activeId} />}
-      {tab === "ous" && <OusSection connectionId={activeId} />}
-      {tab === "history" && <HistorySection connectionId={activeId} />}
+      {/* Sections need a resolved connection id; while the connections
+          query loads (or fails) show the honest state instead of flashing
+          "No directory connection configured yet". */}
+      {connections.isLoading ? (
+        <Loading label="Loading directory connection…" />
+      ) : connections.isError ? (
+        <ErrorState
+          error={connections.error}
+          onRetry={() => void connections.refetch()}
+        />
+      ) : (
+        <>
+          {tab === "overview" && <OverviewSection />}
+          {tab === "connections" && <ConnectionsSection canWrite={canWrite} canSync={canSync} />}
+          {tab === "users" && <UsersSection connectionId={activeId} />}
+          {tab === "groups" && <GroupsSection connectionId={activeId} />}
+          {tab === "computers" && <ComputersSection connectionId={activeId} />}
+          {tab === "ous" && <OusSection connectionId={activeId} />}
+          {tab === "insights" && (
+            <FindingsTab connectionId={activeId} canWrite={canWrite} />
+          )}
+          {tab === "health" && <HealthTab connectionId={activeId} />}
+          {tab === "gaps" && <GapsTab connectionId={activeId} />}
+          {tab === "history" && <HistorySection connectionId={activeId} />}
+        </>
+      )}
     </div>
   );
 }

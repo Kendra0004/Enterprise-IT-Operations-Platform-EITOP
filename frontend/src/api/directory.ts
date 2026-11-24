@@ -482,3 +482,228 @@ export function useDecideMatch(computerId: string) {
     onSuccess: invalidate,
   });
 }
+
+// --- Findings (Phase 3.2.2 API / 3.2.3 UI) -----------------------------------
+
+export type FindingStatus = "open" | "acknowledged" | "suppressed" | "resolved";
+export type FindingSeverity = "info" | "low" | "medium" | "high" | "critical";
+export type FindingSubjectType =
+  | "user"
+  | "group"
+  | "computer"
+  | "unknown"
+  | "connection";
+export type FindingAccess = "direct" | "transitive";
+
+/** One finding — mirrors backend `FindingOut` field for field. */
+export interface Finding {
+  id: string;
+  connection_id: string;
+  fingerprint: string;
+  rule_key: string;
+  severity: FindingSeverity | string;
+  status: FindingStatus | string;
+  subject_type: FindingSubjectType | string;
+  access: FindingAccess | null;
+  subject_guid: string | null;
+  subject_dn: string | null;
+  subject_name: string | null;
+  title: string;
+  /** Sanitized evidence from the engine — never credentials or raw LDAP. */
+  detail: Record<string, unknown>;
+  first_seen_at: string;
+  last_seen_at: string;
+  resolved_at: string | null;
+  reopen_count: number;
+  acknowledged_at: string | null;
+  acknowledged_by: string | null;
+  suppressed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Mirrors backend `FindingSummaryOut`. */
+export interface FindingSummary {
+  total: number;
+  open: number;
+  acknowledged: number;
+  suppressed: number;
+  resolved: number;
+  by_severity: Record<string, number>;
+  by_rule: Record<string, number>;
+  by_subject_type: Record<string, number>;
+  privilege_visibility: "full" | "partial" | "insufficient" | string;
+  visibility_reasons: string[];
+  inventory_complete: boolean;
+}
+
+/** Newest-run category entry: fixed statuses + sanitized labels only. */
+export interface CategoryResult {
+  status?: "pending" | "running" | "success" | "failed" | "skipped" | string;
+  label?: string;
+  error_count?: number;
+}
+
+/** Mirrors backend `SyncRunHealthOut` (deliberately no `errors` field). */
+export interface SyncRunHealth {
+  id: string;
+  status: string;
+  trigger: string;
+  started_at: string;
+  finished_at: string | null;
+  duration_ms: number | null;
+  category_results: Record<string, CategoryResult>;
+}
+
+/** Mirrors backend `SyncFreshnessOut`. */
+export interface SyncFreshness {
+  last_success_at: string | null;
+  newest_run_started_at: string | null;
+  sync_interval_minutes: number;
+  sync_overdue: boolean;
+}
+
+/** Mirrors backend `DirectoryHealthOut` — `newest_run` is ALWAYS newest. */
+export interface DirectoryHealth {
+  connection_id: string;
+  inventory_complete: boolean;
+  missing_categories: string[];
+  newest_run: SyncRunHealth | null;
+  privilege_visibility: "full" | "partial" | "insufficient" | string;
+  visibility_reasons: string[];
+  findings: FindingSummary;
+  sync_freshness: SyncFreshness;
+}
+
+/** Mirrors backend `CorrelationGapOut` — matched/rejected never appear. */
+export interface CorrelationGap {
+  computer_id: string;
+  computer_name: string;
+  dns_hostname: string | null;
+  distinguished_name: string;
+  object_guid: string | null;
+  gap_type: "never_reconciled" | "unmatched" | "ambiguous";
+  recon_status: string | null;
+  recon_method: string | null;
+  recon_confidence: string | null;
+  candidates: string[];
+  reviewed_at: string | null;
+}
+
+export interface FindingListParams {
+  connection_id: string;
+  subject_type?: string;
+  access?: string;
+  status?: string;
+  severity?: string;
+  rule_key?: string;
+  page?: number;
+  page_size?: number;
+  sort?: string;
+  order?: "asc" | "desc";
+}
+
+export interface CorrelationGapParams {
+  connection_id: string;
+  gap_type?: string;
+  page?: number;
+  page_size?: number;
+  sort?: string;
+  order?: "asc" | "desc";
+}
+
+export function useFindings(params: FindingListParams) {
+  return useQuery({
+    queryKey: ["directory", "findings", params],
+    queryFn: () => api.get<Page<Finding>>("/directory/findings", {
+      query: {
+        connection_id: params.connection_id,
+        subject_type: params.subject_type,
+        access: params.access,
+        status: params.status,
+        severity: params.severity,
+        rule_key: params.rule_key,
+        page: params.page,
+        page_size: params.page_size ?? 20,
+        sort: params.sort,
+        order: params.order,
+      },
+    }),
+    enabled: Boolean(params.connection_id),
+  });
+}
+
+export function useFinding(id: string | null, connectionId: string) {
+  return useQuery({
+    queryKey: ["directory", "findings", "detail", id, connectionId],
+    queryFn: () =>
+      api.get<Finding>(`/directory/findings/${id}`, {
+        query: { connection_id: connectionId },
+      }),
+    enabled: Boolean(id) && Boolean(connectionId),
+  });
+}
+
+export function useFindingSummary(connectionId: string) {
+  return useQuery({
+    queryKey: ["directory", "findings", "summary", connectionId],
+    queryFn: () =>
+      api.get<FindingSummary>("/directory/findings/summary", {
+        query: { connection_id: connectionId },
+      }),
+    enabled: Boolean(connectionId),
+  });
+}
+
+export function useDirectoryHealth(connectionId: string) {
+  return useQuery({
+    queryKey: ["directory", "health", connectionId],
+    queryFn: () =>
+      api.get<DirectoryHealth>("/directory/health", {
+        query: { connection_id: connectionId },
+      }),
+    enabled: Boolean(connectionId),
+  });
+}
+
+export function useCorrelationGaps(params: CorrelationGapParams) {
+  return useQuery({
+    queryKey: ["directory", "correlation", "gaps", params],
+    queryFn: () => api.get<Page<CorrelationGap>>("/directory/correlation/gaps", {
+      query: {
+        connection_id: params.connection_id,
+        gap_type: params.gap_type,
+        page: params.page,
+        page_size: params.page_size ?? 20,
+        sort: params.sort,
+        order: params.order,
+      },
+    }),
+    enabled: Boolean(params.connection_id),
+  });
+}
+
+/**
+ * Lifecycle transition (ack | suppress | reopen). The connection id rides
+ * in the query string exactly as the backend route declares it; success
+ * invalidates every directory query so list, summary, detail and health
+ * refetch from the API — nothing is updated optimistically.
+ */
+export function useFindingTransition() {
+  const invalidate = useDirectoryInvalidation();
+  return useMutation({
+    mutationFn: ({
+      id,
+      connectionId,
+      action,
+    }: {
+      id: string;
+      connectionId: string;
+      action: "ack" | "suppress" | "reopen";
+    }) =>
+      api.post<Finding>(`/directory/findings/${id}/${action}`, undefined, {
+        query: { connection_id: connectionId },
+      }),
+    onSuccess: invalidate,
+  });
+}
