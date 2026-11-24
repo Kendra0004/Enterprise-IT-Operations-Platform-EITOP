@@ -341,6 +341,8 @@ class FindingOut(BaseModel):
     resolved_at: datetime | None = None
     reopen_count: int = 0
     acknowledged_at: datetime | None = None
+    acknowledged_by: uuid.UUID | None = None
+    suppressed_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -368,9 +370,84 @@ class FindingSummaryOut(BaseModel):
     resolved: int = 0
     by_severity: dict[str, int] = Field(default_factory=dict)
     by_rule: dict[str, int] = Field(default_factory=dict)
+    by_subject_type: dict[str, int] = Field(default_factory=dict)
     privilege_visibility: str
     visibility_reasons: list[str] = Field(default_factory=list)
     inventory_complete: bool = False
+
+
+# --- Health (Phase 3.2.2) ------------------------------------------------------
+
+
+class SyncRunHealthOut(BaseModel):
+    """Newest sync run for the health view: sanitized category results only.
+
+    ``errors`` (raw error labels list) is deliberately NOT exposed here —
+    category results carry the same sanitized labels the sync-history
+    detail endpoint already serves.
+    """
+
+    id: uuid.UUID
+    status: str
+    trigger: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    duration_ms: int | None = None
+    category_results: dict[str, Any] = Field(default_factory=dict)
+
+
+class SyncFreshnessOut(BaseModel):
+    """Freshness facts derived from the connection's own sync cadence."""
+
+    last_success_at: datetime | None = None
+    newest_run_started_at: datetime | None = None
+    sync_interval_minutes: int
+    sync_overdue: bool = True
+
+
+class DirectoryHealthOut(BaseModel):
+    """Directory health: inventory, newest run, visibility, findings.
+
+    ``newest_run`` is ALWAYS the newest run regardless of status — an
+    older successful run never backstops a newer failed/running one.
+    """
+
+    connection_id: uuid.UUID
+    inventory_complete: bool = False
+    missing_categories: list[str] = Field(default_factory=list)
+    newest_run: SyncRunHealthOut | None = None
+    privilege_visibility: str
+    visibility_reasons: list[str] = Field(default_factory=list)
+    findings: FindingSummaryOut
+    sync_freshness: SyncFreshnessOut
+
+
+# --- Correlation gaps (Phase 3.2.2) ---------------------------------------------
+
+
+class CorrelationGapOut(BaseModel):
+    """One directory computer without a resolved endpoint correlation.
+
+    ``gap_type`` distinguishes the three honest gap states:
+    - ``never_reconciled``: no reconciliation row yet (genuinely missing);
+    - ``unmatched``: reconciled, endpoint not linked (genuinely missing);
+    - ``ambiguous``: candidates exist but are ambiguous (needs review).
+
+    ``matched`` and ``rejected`` rows are deliberate decisions and never
+    appear as gaps.
+    """
+
+    computer_id: uuid.UUID
+    computer_name: str
+    dns_hostname: str | None = None
+    distinguished_name: str
+    object_guid: str | None = None
+    gap_type: str
+    recon_status: str | None = None
+    recon_method: str | None = None
+    recon_confidence: str | None = None
+    candidates: list[uuid.UUID] = Field(default_factory=list)
+    reviewed_at: datetime | None = None
 
 
 __all__ = [
@@ -379,10 +456,12 @@ __all__ = [
     "ConnectionSummaryOut",
     "ConnectionTestOut",
     "ConnectionUpdate",
+    "CorrelationGapOut",
     "DirectoryComputerDetailOut",
     "DirectoryComputerOut",
     "DirectoryGroupDetailOut",
     "DirectoryGroupOut",
+    "DirectoryHealthOut",
     "DirectoryOverviewOut",
     "DirectoryUserOut",
     "DomainOut",
@@ -393,6 +472,8 @@ __all__ = [
     "OrganizationalUnitDetailOut",
     "OrganizationalUnitOut",
     "ReconciliationOut",
+    "SyncFreshnessOut",
     "SyncRunDetailOut",
+    "SyncRunHealthOut",
     "SyncRunOut",
 ]

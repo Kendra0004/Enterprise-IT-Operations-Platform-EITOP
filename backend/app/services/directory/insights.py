@@ -30,10 +30,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, text
+from fastapi import Request, status
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
+from app.core.exceptions import AppError
 from app.models import (
     ACCESS_DIRECT,
     ACCESS_TRANSITIVE,
@@ -65,7 +67,9 @@ from app.models import (
     DirectorySyncRun,
     DirectoryUser,
     Endpoint,
+    User,
 )
+from app.services.auth_service import _record_audit
 
 logger = logging.getLogger(__name__)
 
@@ -252,7 +256,7 @@ def newest_sync_run(db: Session, connection_id: uuid.UUID) -> DirectorySyncRun |
     )
 
 
-def _missing_categories(results: Any) -> list[str]:
+def missing_categories(results: Any) -> list[str]:
     """PIPELINE categories that do not explicitly report success."""
     if not isinstance(results, dict):
         return list(INVENTORY_CATEGORIES)
@@ -276,7 +280,7 @@ def inventory_complete(db: Session, connection_id: uuid.UUID) -> bool:
         return False
     if not isinstance(run.category_results, dict) or not run.category_results:
         return False
-    return not _missing_categories(run.category_results)
+    return not missing_categories(run.category_results)
 
 
 # --- Privileged group identification -----------------------------------------
@@ -1030,7 +1034,7 @@ def _connection_findings(
             )
         )
     if not complete:
-        missing = _missing_categories(newest.category_results if newest else None)
+        missing = missing_categories(newest.category_results if newest else None)
         out.append(
             _Pending(
                 fingerprint=connection_fingerprint(RULE_INVENTORY_EMPTY, connection_id),
@@ -1206,40 +1210,190 @@ def _apply_lifecycle(
     return counts
 
 
+# --- Manual lifecycle (Phase 3.2.2) -------------------------------------------
+
+
+def acknowledge_finding(
+    db: Session,
+    row: DirectoryFinding,
+    *,
+    actor: User,
+    request: Request | None = None,
+    now: datetime | None = None,
+) -> DirectoryFinding:
+    """Manual ``open -> acknowledged`` transition (``directory:write``).
+
+    State machine rules enforced here (validation BEFORE any mutation,
+    so a rejected transition leaves zero writes and zero audit rows —
+    the request session rolls back on ``AppError``):
+
+    - already ``acknowledged``: idempotent no-op — no state change,
+      no duplicate audit event;
+    - ``suppressed``: REJECTED — suppression is only ever lifted via
+      ``reopen_finding`` (an ack must not bypass suppressed-state
+      protection, which shields the row from recomputation);
+    - ``resolved``: REJECTED — the condition is gone; recurrence or an
+      explicit reopen is the way back.
+    """
+    if row.status == FINDING_ACKNOWLEDGED:
+        return row
+    if row.status != FINDING_OPEN:
+        raise AppError(
+            status.HTTP_400_BAD_REQUEST,
+            "Invalid transition",
+            f"Cannot acknowledge a {row.status} finding.",
+        )
+    clock = now or datetime.now(UTC)
+    from_status = row.status
+    row.status = FINDING_ACKNOWLEDGED
+    row.acknowledged_by = actor.id
+    row.acknowledged_at = clock
+    _record_audit(
+        db,
+        event_type="directory.finding.acknowledged",
+        outcome="success",
+        request=request,
+        actor=actor,
+        target=row.fingerprint,
+        detail={
+            "connection_id": str(row.connection_id),
+            "finding_id": str(row.id),
+            "rule_key": row.rule_key,
+            "from_status": from_status,
+            "to_status": FINDING_ACKNOWLEDGED,
+        },
+    )
+    return row
+
+
+def suppress_finding(
+    db: Session,
+    row: DirectoryFinding,
+    *,
+    actor: User,
+    request: Request | None = None,
+    now: datetime | None = None,
+) -> DirectoryFinding:
+    """Manual ``open|acknowledged -> suppressed`` transition.
+
+    - already ``suppressed``: idempotent no-op (no duplicate audit);
+    - ``resolved``: REJECTED (nothing active to suppress);
+    - ``suppressed`` is terminal for recomputation — this is the ONLY
+      way a row becomes suppressed, and ``reopen_finding`` is the only
+      way out;
+    - prior ack columns are kept as history (``suppressed_at`` marks
+      the current state); a later reopen clears them.
+    """
+    if row.status == FINDING_SUPPRESSED:
+        return row
+    if row.status not in (FINDING_OPEN, FINDING_ACKNOWLEDGED):
+        raise AppError(
+            status.HTTP_400_BAD_REQUEST,
+            "Invalid transition",
+            f"Cannot suppress a {row.status} finding.",
+        )
+    clock = now or datetime.now(UTC)
+    from_status = row.status
+    row.status = FINDING_SUPPRESSED
+    row.suppressed_at = clock
+    _record_audit(
+        db,
+        event_type="directory.finding.suppressed",
+        outcome="success",
+        request=request,
+        actor=actor,
+        target=row.fingerprint,
+        detail={
+            "connection_id": str(row.connection_id),
+            "finding_id": str(row.id),
+            "rule_key": row.rule_key,
+            "from_status": from_status,
+            "to_status": FINDING_SUPPRESSED,
+        },
+    )
+    return row
+
+
+def reopen_finding(
+    db: Session,
+    row: DirectoryFinding,
+    *,
+    actor: User,
+    request: Request | None = None,
+    now: datetime | None = None,
+) -> DirectoryFinding:
+    """Manual transition back to ``open`` from any non-open state.
+
+    - ``resolved -> open`` and ``suppressed -> open`` increment
+      ``reopen_count`` — the same counter the automatic recurrence
+      uses, so manual and system reopens stay consistent;
+    - ``acknowledged -> open`` is an un-acknowledge: ack columns are
+      cleared but ``reopen_count`` is NOT bumped (the finding never
+      closed);
+    - already ``open``: idempotent no-op (no duplicate audit);
+    - ``resolved_at``/``suppressed_at``/ack columns are always cleared,
+      ``first_seen_at`` is never touched.
+    """
+    if row.status == FINDING_OPEN:
+        return row
+    if row.status not in (
+        FINDING_RESOLVED,
+        FINDING_SUPPRESSED,
+        FINDING_ACKNOWLEDGED,
+    ):
+        raise AppError(
+            status.HTTP_400_BAD_REQUEST,
+            "Invalid transition",
+            f"Cannot reopen a {row.status} finding.",
+        )
+    from_status = row.status
+    row.status = FINDING_OPEN
+    row.resolved_at = None
+    row.suppressed_at = None
+    row.acknowledged_by = None
+    row.acknowledged_at = None
+    if from_status in (FINDING_RESOLVED, FINDING_SUPPRESSED):
+        row.reopen_count = (row.reopen_count or 0) + 1
+    _record_audit(
+        db,
+        event_type="directory.finding.reopened",
+        outcome="success",
+        request=request,
+        actor=actor,
+        target=row.fingerprint,
+        detail={
+            "connection_id": str(row.connection_id),
+            "finding_id": str(row.id),
+            "rule_key": row.rule_key,
+            "from_status": from_status,
+            "to_status": FINDING_OPEN,
+            "reopen_count": row.reopen_count,
+        },
+    )
+    return row
+
+
 # --- Entry point --------------------------------------------------------------
 
 
-def recompute_connection(
-    db: Session,
-    connection_id: uuid.UUID,
-    *,
-    settings: Settings | None = None,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    """Recompute all findings for one connection (idempotent).
+@dataclass
+class _Graph:
+    """Mirror rows the nested-group traversal runs on."""
 
-    First statement in the transaction is a transaction-scoped advisory
-    lock on (INSIGHTS_LOCK_NS, hash(connection_id)): a competing
-    recomputation makes this one skip with ZERO writes. The lock is
-    released when the transaction ends.
+    privileged: list[PrivilegedGroup]
+    adjacency: dict[uuid.UUID, list[DirectoryGroupMembership]]
+    groups_by_guid: dict[str, DirectoryGroup]
+    groups_by_dn: dict[str, DirectoryGroup]
+    users_by_dn: dict[str, _ObjectRef]
+    computers_by_dn: dict[str, _ObjectRef]
+
+
+def _load_graph(db: Session, connection_id: uuid.UUID) -> _Graph:
+    """Load the traversal inputs for one connection (read-only).
+
+    Shared by ``recompute_connection`` and the API-facing
+    ``privilege_visibility`` so both always walk the exact same graph.
     """
-    settings = settings or get_settings()
-    clock = now or datetime.now(UTC)
-
-    acquired = db.execute(
-        text("SELECT pg_try_advisory_xact_lock(:ns, hashtext(:cid))"),
-        {"ns": INSIGHTS_LOCK_NS, "cid": str(connection_id)},
-    ).scalar()
-    if not acquired:
-        # Label-only log: no DNs, no finding content.
-        logger.info("insights_recompute_skipped")
-        db.rollback()
-        return {"skipped": True, "reason": "lock_held"}
-
-    complete = inventory_complete(db, connection_id)
-    newest = newest_sync_run(db, connection_id)
-    privileged = identify_privileged_groups(db, connection_id)
-
     adjacency: dict[uuid.UUID, list[DirectoryGroupMembership]] = {}
     groups_by_guid: dict[str, DirectoryGroup] = {}
     groups_by_dn: dict[str, DirectoryGroup] = {}
@@ -1280,13 +1434,145 @@ def recompute_connection(
     ).all():
         computers_by_dn[c[0].lower()] = _ObjectRef(guid=c[1], name=c[2], enabled=c[3])
 
+    return _Graph(
+        privileged=identify_privileged_groups(db, connection_id),
+        adjacency=adjacency,
+        groups_by_guid=groups_by_guid,
+        groups_by_dn=groups_by_dn,
+        users_by_dn=users_by_dn,
+        computers_by_dn=computers_by_dn,
+    )
+
+
+def privilege_visibility(
+    db: Session,
+    connection_id: uuid.UUID,
+    *,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    """Effective privilege-visibility verdict — read-only, no writes.
+
+    Reuses the same completeness check, graph loader and bounded BFS as
+    ``recompute_connection`` (single implementation), so the API can
+    never report a verdict different from what the engine would derive.
+    """
+    settings = settings or get_settings()
+    complete = inventory_complete(db, connection_id)
+    graph = _load_graph(db, connection_id)
     traversal = _traverse(
-        privileged,
-        adjacency,
-        groups_by_guid,
-        groups_by_dn,
-        users_by_dn,
-        computers_by_dn,
+        graph.privileged,
+        graph.adjacency,
+        graph.groups_by_guid,
+        graph.groups_by_dn,
+        graph.users_by_dn,
+        graph.computers_by_dn,
+        settings.directory_nested_group_max_depth,
+    )
+    visibility, reasons = _visibility(complete, traversal.reasons)
+    return {
+        "privilege_visibility": visibility,
+        "visibility_reasons": reasons,
+        "inventory_complete": complete,
+    }
+
+
+def findings_summary(db: Session, connection_id: uuid.UUID) -> dict[str, Any]:
+    """Aggregate finding counts + the visibility verdict for one connection.
+
+    Single GROUP BY over ``directory_findings`` (one query, no N+1) plus
+    ``privilege_visibility`` for the connection-level verdict. The
+    connection must already exist — callers resolve it first.
+    """
+    rows = db.execute(
+        select(
+            DirectoryFinding.status,
+            DirectoryFinding.severity,
+            DirectoryFinding.rule_key,
+            DirectoryFinding.subject_type,
+            func.count(DirectoryFinding.id),
+        )
+        .where(DirectoryFinding.connection_id == connection_id)
+        .group_by(
+            DirectoryFinding.status,
+            DirectoryFinding.severity,
+            DirectoryFinding.rule_key,
+            DirectoryFinding.subject_type,
+        )
+    ).all()
+
+    counts: dict[str, int] = {
+        FINDING_OPEN: 0,
+        FINDING_ACKNOWLEDGED: 0,
+        FINDING_SUPPRESSED: 0,
+        FINDING_RESOLVED: 0,
+    }
+    by_severity: dict[str, int] = {}
+    by_rule: dict[str, int] = {}
+    by_subject_type: dict[str, int] = {}
+    total = 0
+    for row_status, row_severity, row_rule, row_subject, row_count in rows:
+        n = int(row_count)
+        total += n
+        if row_status in counts:
+            counts[row_status] += n
+        by_severity[row_severity] = by_severity.get(row_severity, 0) + n
+        by_rule[row_rule] = by_rule.get(row_rule, 0) + n
+        by_subject_type[row_subject] = by_subject_type.get(row_subject, 0) + n
+
+    visibility = privilege_visibility(db, connection_id)
+    return {
+        "total": total,
+        "open": counts[FINDING_OPEN],
+        "acknowledged": counts[FINDING_ACKNOWLEDGED],
+        "suppressed": counts[FINDING_SUPPRESSED],
+        "resolved": counts[FINDING_RESOLVED],
+        "by_severity": by_severity,
+        "by_rule": by_rule,
+        "by_subject_type": by_subject_type,
+        "privilege_visibility": visibility["privilege_visibility"],
+        "visibility_reasons": visibility["visibility_reasons"],
+        "inventory_complete": visibility["inventory_complete"],
+    }
+
+
+def recompute_connection(
+    db: Session,
+    connection_id: uuid.UUID,
+    *,
+    settings: Settings | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Recompute all findings for one connection (idempotent).
+
+    First statement in the transaction is a transaction-scoped advisory
+    lock on (INSIGHTS_LOCK_NS, hash(connection_id)): a competing
+    recomputation makes this one skip with ZERO writes. The lock is
+    released when the transaction ends.
+    """
+    settings = settings or get_settings()
+    clock = now or datetime.now(UTC)
+
+    acquired = db.execute(
+        text("SELECT pg_try_advisory_xact_lock(:ns, hashtext(:cid))"),
+        {"ns": INSIGHTS_LOCK_NS, "cid": str(connection_id)},
+    ).scalar()
+    if not acquired:
+        # Label-only log: no DNs, no finding content.
+        logger.info("insights_recompute_skipped")
+        db.rollback()
+        return {"skipped": True, "reason": "lock_held"}
+
+    complete = inventory_complete(db, connection_id)
+    newest = newest_sync_run(db, connection_id)
+    graph = _load_graph(db, connection_id)
+
+    traversal = _traverse(
+        graph.privileged,
+        graph.adjacency,
+        graph.groups_by_guid,
+        graph.groups_by_dn,
+        graph.users_by_dn,
+        graph.computers_by_dn,
         settings.directory_nested_group_max_depth,
     )
     visibility, visibility_reasons = _visibility(complete, traversal.reasons)
@@ -1335,14 +1621,20 @@ __all__ = [
     "RULE_UNKNOWN_MEMBER",
     "RULE_USER_INACTIVE",
     "RULE_COMPUTER_STALE",
+    "acknowledge_finding",
     "builtin_privileged_rid",
     "connection_fingerprint",
     "domain_privileged_rid",
+    "findings_summary",
     "identify_privileged_groups",
     "inventory_complete",
     "member_fingerprint",
+    "missing_categories",
     "newest_sync_run",
     "object_fingerprint",
     "object_key",
+    "privilege_visibility",
     "recompute_connection",
+    "reopen_finding",
+    "suppress_finding",
 ]

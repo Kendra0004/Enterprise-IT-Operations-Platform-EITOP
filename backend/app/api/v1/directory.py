@@ -1,4 +1,4 @@
-"""Directory (read-only Active Directory) API (Phase 3.1).
+"""Directory (read-only Active Directory) API (Phase 3.1, extended 3.2.2).
 
 Route conventions (mirrors endpoints.py):
 - ``Page`` + ``page/page_size/q/sort/order`` with per-resource sort
@@ -9,10 +9,17 @@ Route conventions (mirrors endpoints.py):
 - No response schema exposes the bind password or its ciphertext; LDAP
   filter construction goes through ``build_filter`` (escaped) — user
   input never reaches a filter raw.
+
+Phase 3.2.2 adds the findings/health/correlation read APIs and the
+manual finding lifecycle (ack/suppress/reopen): transition logic lives
+in ``services.directory.insights`` (never in route handlers), audit
+rows are appended only for successful state changes, and every query
+is connection-scoped.
 """
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
@@ -27,7 +34,13 @@ from app.models import (
     CONFIDENCE_HIGH,
     CONFIDENCE_LOW,
     ENDPOINT_REVOKED,
+    FINDING_ACCESSES,
+    FINDING_SEVERITIES,
+    FINDING_STATUSES,
+    FINDING_SUBJECT_TYPES,
     RECON_MANUAL,
+    RECON_NEEDS_REVIEW,
+    RECON_UNMATCHED,
     SYNC_FAILED,
     SYNC_RUNNING,
     SYNC_SUCCESS,
@@ -35,6 +48,7 @@ from app.models import (
     DirectoryComputer,
     DirectoryConnection,
     DirectoryDomain,
+    DirectoryFinding,
     DirectoryGroup,
     DirectoryGroupMembership,
     DirectoryOrganizationalUnit,
@@ -51,29 +65,49 @@ from app.schemas.directory import (
     ConnectionSummaryOut,
     ConnectionTestOut,
     ConnectionUpdate,
+    CorrelationGapOut,
     DirectoryComputerDetailOut,
     DirectoryComputerOut,
     DirectoryGroupDetailOut,
     DirectoryGroupOut,
+    DirectoryHealthOut,
     DirectoryOverviewOut,
     DirectoryUserOut,
     DomainOut,
+    FindingOut,
+    FindingSummaryOut,
     GroupMemberOut,
     MatchDecisionIn,
     OrganizationalUnitDetailOut,
     OrganizationalUnitOut,
     ReconciliationOut,
+    SyncFreshnessOut,
     SyncRunDetailOut,
+    SyncRunHealthOut,
     SyncRunOut,
 )
 from app.services.auth_service import _record_audit
-from app.services.directory import connection_service
+from app.services.directory import connection_service, insights
+from app.services.directory.insights import RULE_KEYS
 
 router = APIRouter(prefix="/directory", tags=["directory"])
 
 DirectoryRead = Annotated[User, Depends(require_permissions("directory:read"))]
 DirectoryWrite = Annotated[User, Depends(require_permissions("directory:write"))]
 DirectorySyncPerm = Annotated[User, Depends(require_permissions("directory:sync"))]
+
+
+def _enum_pattern(values: Any) -> str:
+    """Regex from exact string values — query filters can never drift
+    from the model constants they mirror."""
+    return "^(?:" + "|".join(re.escape(v) for v in values) + ")$"
+
+
+_SUBJECT_TYPE_PATTERN = _enum_pattern(FINDING_SUBJECT_TYPES)
+_ACCESS_PATTERN = _enum_pattern(FINDING_ACCESSES)
+_FINDING_STATUS_PATTERN = _enum_pattern(FINDING_STATUSES)
+_SEVERITY_PATTERN = _enum_pattern(FINDING_SEVERITIES)
+_RULE_KEY_PATTERN = _enum_pattern(RULE_KEYS)
 
 
 def _connection_or_404(db: Session, connection_id: uuid.UUID) -> DirectoryConnection:
@@ -1063,3 +1097,361 @@ def get_sync_run(
             "The sync run does not exist.",
         )
     return SyncRunDetailOut.model_validate(row)
+
+
+# --- Findings (Phase 3.2.2) ---------------------------------------------------
+
+
+_FINDING_SORTS = {
+    "first_seen_at": DirectoryFinding.first_seen_at,
+    "last_seen_at": DirectoryFinding.last_seen_at,
+    "updated_at": DirectoryFinding.updated_at,
+    "severity": DirectoryFinding.severity,
+    "status": DirectoryFinding.status,
+    "rule_key": DirectoryFinding.rule_key,
+}
+
+
+@router.get("/findings", response_model=Page)
+def list_findings(
+    db: DbSession,
+    _: DirectoryRead,
+    connection_id: uuid.UUID,
+    subject_type: Annotated[
+        str | None, Query(pattern=_SUBJECT_TYPE_PATTERN)
+    ] = None,
+    access: Annotated[str | None, Query(pattern=_ACCESS_PATTERN)] = None,
+    finding_status: Annotated[
+        str | None, Query(alias="status", pattern=_FINDING_STATUS_PATTERN)
+    ] = None,
+    severity: Annotated[str | None, Query(pattern=_SEVERITY_PATTERN)] = None,
+    rule_key: Annotated[str | None, Query(pattern=_RULE_KEY_PATTERN)] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    sort: str = Query("updated_at"),
+    order: str = Query("desc", pattern="^(asc|desc)$"),
+) -> Page:
+    """Findings across connections with enum-safe filters.
+
+    Every filter value is validated against the model constants via a
+    pattern derived from them (``_SUBJECT_TYPE_PATTERN`` et al.), so the
+    API can never accept a status/severity the DB CHECK would reject.
+    """
+    _connection_or_404(db, connection_id)
+    criteria = [DirectoryFinding.connection_id == connection_id]
+    if subject_type is not None:
+        criteria.append(DirectoryFinding.subject_type == subject_type)
+    if access is not None:
+        criteria.append(DirectoryFinding.access == access)
+    if finding_status is not None:
+        criteria.append(DirectoryFinding.status == finding_status)
+    if severity is not None:
+        criteria.append(DirectoryFinding.severity == severity)
+    if rule_key is not None:
+        criteria.append(DirectoryFinding.rule_key == rule_key)
+    stmt = select(DirectoryFinding)
+    count_stmt = select(func.count()).select_from(DirectoryFinding)
+    if criteria:
+        stmt = stmt.where(*criteria)
+        count_stmt = count_stmt.where(*criteria)
+    stmt = _apply_sort(
+        stmt, sort=sort, order=order,
+        allowlist=_FINDING_SORTS,
+        tiebreak=DirectoryFinding.id,
+    )
+    return _page(
+        db, stmt, count_stmt,
+        page=page, page_size=page_size, out=FindingOut,
+    )
+
+
+@router.get("/findings/summary", response_model=FindingSummaryOut)
+def findings_summary(
+    db: DbSession,
+    _: DirectoryRead,
+    connection_id: uuid.UUID,
+) -> FindingSummaryOut:
+    """Counts by status/severity/rule/subject + visibility verdict.
+
+    ``connection_id`` is required: the visibility verdict is a
+    connection-level fact, never a cross-connection rollup.
+    """
+    _connection_or_404(db, connection_id)
+    return FindingSummaryOut.model_validate(
+        insights.findings_summary(db, connection_id)
+    )
+
+
+@router.get("/findings/{finding_id}", response_model=FindingOut)
+def get_finding(
+    db: DbSession,
+    finding_id: uuid.UUID,
+    _: DirectoryRead,
+    connection_id: uuid.UUID,
+) -> FindingOut:
+    """Full evidence for one finding, scoped to ``connection_id``.
+
+    A finding id belonging to another connection answers 404 — ids are
+    never accepted across connections.
+    """
+    row = _scoped_or_404(db, DirectoryFinding, finding_id, connection_id)
+    return FindingOut.model_validate(row)
+
+
+def _transition(
+    db: Session,
+    request: Request,
+    actor: User,
+    finding_id: uuid.UUID,
+    connection_id: uuid.UUID,
+    action: str,
+) -> FindingOut:
+    """Shared lifecycle handler: scope-check, transition, return fresh row.
+
+    Transition rules live in ``services.directory.insights`` (never in
+    route handlers); an illegal transition raises ``AppError(400)``
+    BEFORE any mutation, so the request session rolls back with zero
+    writes and zero audit rows.
+    """
+    row = _scoped_or_404(db, DirectoryFinding, finding_id, connection_id)
+    if action == "ack":
+        row = insights.acknowledge_finding(db, row, actor=actor, request=request)
+    elif action == "suppress":
+        row = insights.suppress_finding(db, row, actor=actor, request=request)
+    else:
+        row = insights.reopen_finding(db, row, actor=actor, request=request)
+    db.flush()
+    return FindingOut.model_validate(row)
+
+
+@router.post("/findings/{finding_id}/ack", response_model=FindingOut)
+def ack_finding(
+    db: DbSession,
+    request: Request,
+    finding_id: uuid.UUID,
+    payload_connection_id: Annotated[uuid.UUID, Query(alias="connection_id")],
+    actor: DirectoryWrite,
+) -> FindingOut:
+    """``open -> acknowledged`` (idempotent; suppressed/resolved → 400)."""
+    return _transition(
+        db, request, actor, finding_id, payload_connection_id, "ack"
+    )
+
+
+@router.post("/findings/{finding_id}/suppress", response_model=FindingOut)
+def suppress_finding(
+    db: DbSession,
+    request: Request,
+    finding_id: uuid.UUID,
+    payload_connection_id: Annotated[uuid.UUID, Query(alias="connection_id")],
+    actor: DirectoryWrite,
+) -> FindingOut:
+    """``open|acknowledged -> suppressed`` (terminal for recomputation)."""
+    return _transition(
+        db, request, actor, finding_id, payload_connection_id, "suppress"
+    )
+
+
+@router.post("/findings/{finding_id}/reopen", response_model=FindingOut)
+def reopen_finding(
+    db: DbSession,
+    request: Request,
+    finding_id: uuid.UUID,
+    payload_connection_id: Annotated[uuid.UUID, Query(alias="connection_id")],
+    actor: DirectoryWrite,
+) -> FindingOut:
+    """Back to ``open`` from resolved/suppressed/acknowledged."""
+    return _transition(
+        db, request, actor, finding_id, payload_connection_id, "reopen"
+    )
+
+
+# --- Directory health (Phase 3.2.2) --------------------------------------------
+
+
+@router.get("/health", response_model=DirectoryHealthOut)
+def directory_health(
+    db: DbSession,
+    _: DirectoryRead,
+    connection_id: uuid.UUID,
+) -> DirectoryHealthOut:
+    """Health of one directory connection.
+
+    The newest run is reported REGARDLESS of status (an older success
+    never backfills a newer failure); missing run ⇒ incomplete
+    inventory with all nine PIPELINE categories listed as missing.
+    Visibility comes from ``insights.privilege_visibility`` — the same
+    function the engine uses, never a second implementation.
+    """
+    _connection_or_404(db, connection_id)
+    newest = insights.newest_sync_run(db, connection_id)
+    visibility = insights.privilege_visibility(db, connection_id)
+
+    if newest is None:
+        missing = list(insights.INVENTORY_CATEGORIES)
+        run_out: SyncRunHealthOut | None = None
+    else:
+        missing = (
+            []
+            if visibility["inventory_complete"]
+            else insights.missing_categories(newest.category_results)
+        )
+        run_out = SyncRunHealthOut(
+            id=newest.id,
+            status=newest.status,
+            trigger=newest.trigger,
+            started_at=newest.started_at,
+            finished_at=newest.finished_at,
+            duration_ms=newest.duration_ms,
+            category_results=(
+                newest.category_results
+                if isinstance(newest.category_results, dict)
+                else {}
+            ),
+        )
+
+    connection = db.get(DirectoryConnection, connection_id)
+    assert connection is not None  # _connection_or_404 above
+    last_success = db.scalar(
+        select(func.max(DirectorySyncRun.finished_at)).where(
+            DirectorySyncRun.connection_id == connection_id,
+            DirectorySyncRun.status == SYNC_SUCCESS,
+        )
+    )
+    interval = connection.sync_interval_minutes
+    sync_overdue = last_success is None or (
+        datetime.now(UTC) - last_success > timedelta(minutes=interval)
+    )
+
+    return DirectoryHealthOut(
+        connection_id=connection_id,
+        inventory_complete=bool(visibility["inventory_complete"]),
+        missing_categories=missing,
+        newest_run=run_out,
+        privilege_visibility=visibility["privilege_visibility"],
+        visibility_reasons=visibility["visibility_reasons"],
+        findings=FindingSummaryOut.model_validate(
+            insights.findings_summary(db, connection_id)
+        ),
+        sync_freshness=SyncFreshnessOut(
+            last_success_at=last_success,
+            newest_run_started_at=newest.started_at if newest else None,
+            sync_interval_minutes=interval,
+            sync_overdue=sync_overdue,
+        ),
+    )
+
+
+# --- Correlation gaps (Phase 3.2.2) --------------------------------------------
+
+
+@router.get("/correlation/gaps", response_model=Page)
+def correlation_gaps(
+    db: DbSession,
+    _: DirectoryRead,
+    connection_id: uuid.UUID,
+    gap_type: Annotated[
+        str | None,
+        Query(pattern="^(never_reconciled|unmatched|ambiguous)$"),
+    ] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    sort: str = Query("name"),
+    order: str = Query("asc", pattern="^(asc|desc)$"),
+) -> Page:
+    """AD computers without a resolved endpoint correlation.
+
+    Gap = no reconciliation row (``never_reconciled``), an ``unmatched``
+    row with no endpoint, or an ambiguous ``needs_review`` row. Matched
+    and manually ``rejected`` rows are deliberate decisions and are NOT
+    gaps.
+    """
+    _connection_or_404(db, connection_id)
+    gap_criteria = [
+        DirectoryComputer.connection_id == connection_id,
+        or_(
+            DirectoryReconciliation.id.is_(None),
+            DirectoryReconciliation.status == RECON_UNMATCHED,
+            DirectoryReconciliation.status == RECON_NEEDS_REVIEW,
+        ),
+    ]
+    if gap_type == "never_reconciled":
+        gap_criteria.append(DirectoryReconciliation.id.is_(None))
+    elif gap_type == "unmatched":
+        gap_criteria.append(
+            DirectoryReconciliation.status == RECON_UNMATCHED
+        )
+    elif gap_type == "ambiguous":
+        gap_criteria.append(
+            DirectoryReconciliation.status == RECON_NEEDS_REVIEW
+        )
+
+    stmt = (
+        select(DirectoryComputer)
+        .outerjoin(
+            DirectoryReconciliation,
+            DirectoryReconciliation.computer_id == DirectoryComputer.id,
+        )
+        .where(*gap_criteria)
+    )
+    count_stmt = (
+        select(func.count())
+        .select_from(DirectoryComputer)
+        .outerjoin(
+            DirectoryReconciliation,
+            DirectoryReconciliation.computer_id == DirectoryComputer.id,
+        )
+        .where(*gap_criteria)
+    )
+    stmt = _apply_sort(
+        stmt, sort=sort, order=order,
+        allowlist={
+            "name": DirectoryComputer.name,
+            "last_seen_at": DirectoryComputer.last_seen_at,
+        },
+        tiebreak=DirectoryComputer.id,
+    )
+    total = db.scalar(count_stmt) or 0
+    rows = db.scalars(
+        stmt.offset((page - 1) * page_size).limit(page_size)
+    ).all()
+
+    recons = {
+        r.computer_id: r
+        for r in db.scalars(
+            select(DirectoryReconciliation).where(
+                DirectoryReconciliation.computer_id.in_(
+                    [c.id for c in rows] or [uuid.UUID(int=0)]
+                )
+            )
+        ).all()
+    }
+    items: list[CorrelationGapOut] = []
+    for computer in rows:
+        recon = recons.get(computer.id)
+        if recon is None:
+            gap = "never_reconciled"
+            raw_candidates: list = []
+        else:
+            gap = (
+                "ambiguous"
+                if recon.status == RECON_NEEDS_REVIEW
+                else "unmatched"
+            )
+            raw_candidates = recon.candidates or []
+        items.append(
+            CorrelationGapOut(
+                computer_id=computer.id,
+                computer_name=computer.name,
+                dns_hostname=computer.dns_hostname,
+                distinguished_name=computer.distinguished_name,
+                object_guid=computer.object_guid,
+                gap_type=gap,
+                recon_status=recon.status if recon else None,
+                recon_method=recon.method if recon else None,
+                recon_confidence=recon.confidence if recon else None,
+                candidates=[uuid.UUID(str(c)) for c in raw_candidates],
+                reviewed_at=recon.reviewed_at if recon else None,
+            )
+        )
+    return Page(items=items, total=total, page=page, page_size=page_size)
