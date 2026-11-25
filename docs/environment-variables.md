@@ -97,3 +97,14 @@ touching data or run status.
 |---|---|---|
 | `VITE_API_BASE_URL` | `/api/v1` | API prefix baked at build time |
 | `VITE_BACKEND_URL` | `http://localhost:8000` | Dev-proxy target only |
+
+## Backup scripts (infrastructure/scripts)
+
+| Variable | Default | Description |
+|---|---|---|
+| `BACKUP_ENCRYPTION_KEY` | — (required) | AES-256-CBC key for `backup.sh`/`restore.sh`; env only, never argv |
+| `BACKUP_RETENTION_DAYS` | `30` | Prunes backups older than N days after each run |
+| `COMPOSE_FILE` | `docker-compose.yml` | Compose file(s) the scripts target (use `docker-compose.yml:docker-compose.prod.yml` in production) |
+
+`COMPOSE_PROJECT_NAME` is honoured as usual for targeting a specific
+stack (e.g. a disposable validation project).

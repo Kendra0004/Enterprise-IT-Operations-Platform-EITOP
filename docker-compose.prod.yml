@@ -1,0 +1,95 @@
+# EITOP production overlay — usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Requirements before first start:
+#   * .env with APP_ENV=production, DEBUG=false, strong SECRET_KEY,
+#     strong POSTGRES_PASSWORD / REDIS_PASSWORD, https CORS_ORIGINS
+#     (the application refuses to boot otherwise — fail-fast validation)
+#   * ./certs/fullchain.pem + ./certs/privkey.pem for the edge proxy
+#
+# What this overlay changes vs. the base file:
+#   * backend loopback port publish removed — API reachable only through
+#     the TLS edge proxy (internal network)
+#   * frontend host port removed — static SPA reachable only via the proxy
+#   * TLS edge proxy added (80 → 443 redirect, HSTS)
+#   * resource limits + JSON log rotation on all long-running services
+#   * worker healthcheck (celery inspect ping)
+#   * explicit APP_ENV/DEBUG/CORS for backend, worker, beat
+
+services:
+  backend:
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS in .env (https:// origins, comma separated)}
+    ports: !override []          # API only behind the edge proxy
+    mem_limit: 1g
+    logging: &log-rotate
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  worker:
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS in .env (https:// origins, comma separated)}
+    mem_limit: 2g                # membership rebuild + findings engine
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.core.celery_app:celery_app inspect ping -d celery@$$HOSTNAME -t 5 2>/dev/null | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging: *log-rotate
+
+  beat:
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS in .env (https:// origins, comma separated)}
+    mem_limit: 256m
+    logging: *log-rotate
+
+  postgres:
+    mem_limit: 2g
+    # Structured log retention handled by docker json-file rotation below.
+    logging: *log-rotate
+
+  redis:
+    mem_limit: 512m
+    logging: *log-rotate
+    # NOTE: never enable maxmemory eviction policies (allkeys-*) here —
+    # Redis holds Celery broker queues and rate-limit counters; evicting
+    # them silently drops jobs or resets brute-force protection.
+
+  frontend:
+    ports: !override []          # static SPA only behind the edge proxy
+    mem_limit: 256m
+    logging: *log-rotate
+
+  # TLS-terminating edge proxy. Certificates live in ./certs (gitignored).
+  proxy:
+    image: nginx:1.27-alpine
+    depends_on:
+      frontend:
+        condition: service_started
+      backend:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infrastructure/nginx/eitop.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+    restart: unless-stopped
+    networks: [eitop]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+      - /tmp
+    logging: *log-rotate

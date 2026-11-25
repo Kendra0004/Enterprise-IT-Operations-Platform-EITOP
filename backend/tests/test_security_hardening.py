@@ -159,7 +159,13 @@ def test_docs_disabled_in_production(monkeypatch):
     from app.core.config import Settings
     from fastapi.testclient import TestClient
 
-    prod = Settings(app_env="production", secret_key="production-test-key-0123456789")
+    prod = Settings(
+        app_env="production",
+        secret_key="production-test-key-0123456789-0123456789",
+        database_url="postgresql+psycopg://eitop:strong-test-pw@postgres:5432/eitop",
+        redis_url="redis://:strong-test-redis-pw@redis:6379/0",
+        cors_origins="https://eitop.example.com",
+    )
     monkeypatch.setattr(main_module, "get_settings", lambda: prod)
 
     app = main_module.create_app()

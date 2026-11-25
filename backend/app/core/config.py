@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -130,6 +130,69 @@ class Settings(BaseSettings):
                 "directory_max_sync_minutes must be >= directory_stale_run_minutes"
             )
         return v
+
+    @model_validator(mode="after")
+    def _production_safety(self) -> "Settings":
+        """Fail startup when production is configured insecurely.
+
+        Checked on every process that loads settings (API, worker, beat,
+        migrations), so a bad deploy dies at boot instead of silently
+        running with dev credentials. Development and testing are
+        unaffected — the checks only fire under APP_ENV=production.
+        """
+        if not self.is_production:
+            return self
+
+        problems: list[str] = []
+
+        if self.debug:
+            problems.append("APP_ENV=production requires DEBUG=false")
+
+        # Secret key: length + no development/placeholder values.
+        if len(self.secret_key) < 32:
+            problems.append("SECRET_KEY must be at least 32 characters in production")
+        lowered = self.secret_key.lower()
+        for marker in ("change-me", "changeme", "test-secret", "not-for-production",
+                       "insecure", "example"):
+            if marker in lowered:
+                problems.append(
+                    "SECRET_KEY is a known placeholder/development value"
+                )
+                break
+
+        # Database credentials: reject compose development defaults.
+        db_lower = self.database_url.lower()
+        if "eitop:eitop@" in db_lower:
+            problems.append(
+                "DATABASE_URL still uses the development eitop:eitop credentials"
+            )
+        if "change-me" in db_lower:
+            problems.append("DATABASE_URL password is a placeholder")
+
+        # Redis credentials: require a password and reject dev defaults.
+        if "change-me-redis-password" in self.redis_url.lower():
+            problems.append("redis password is a placeholder")
+        if "eitop-dev-redis" in self.redis_url.lower():
+            problems.append("redis still uses the development default password")
+        # redis://[:password]@host — password segment must exist before @.
+        redis_auth = self.redis_url.split("://", 1)[-1] if "://" in self.redis_url else ""
+        if "@" not in redis_auth:
+            problems.append("redis URL must carry an authentication password")
+
+        # CORS: https origins only, never wildcard.
+        for origin in self.cors_origin_list:
+            if origin == "*":
+                problems.append("CORS wildcard '*' is not allowed in production")
+            elif not origin.startswith("https://"):
+                problems.append(
+                    f"CORS origin must use https in production: {origin}"
+                )
+
+        if problems:
+            raise ValueError(
+                "Insecure production configuration: " + "; ".join(problems)
+            )
+        return self
 
     @property
     def is_production(self) -> bool:
