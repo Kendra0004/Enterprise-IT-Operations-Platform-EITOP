@@ -8,7 +8,8 @@ cp .env.example .env   # set SECRET_KEY
 docker compose up -d postgres redis   # only the data services
 
 # Backend (host venv)
-cd backend && source .venv/bin/activate
+cd backend
+python -m venv .venv && source .venv/bin/activate   # first time only
 pip install -r requirements-dev.txt   # runtime + test/lint toolchain
 uvicorn app.main:app --reload
 
@@ -38,8 +39,11 @@ backend/app/
   db/            # seed script
   tasks/         # Celery tasks
 backend/tests/   # pytest suites
+backend/alembic/ # migrations (forward-only in production)
 frontend/src/    # React SPA (auth, layout, pages, api client)
 frontend/tests/  # vitest suites
+collectors/linux # Python collector (pytest) · collectors/windows (Pester)
+infrastructure/  # nginx edge config, backup/restore scripts
 docs/            # this documentation
 ```
 

@@ -81,8 +81,8 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 This procedure recovers the last successful backup (RPO = backup
 interval, e.g. 24 h with daily cron). Continuous PITR (WAL archiving) is
-deliberately out of scope for this phase — see "Remaining production
-risks" in the Phase 4 report.
+deliberately out of scope — see "Explicit limitations" in
+[../architecture/security.md](../architecture/security.md).
 
 ## Backup integrity verification
 

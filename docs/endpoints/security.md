@@ -102,9 +102,18 @@ implemented. Tests referenced live in `backend/tests/test_enrollment.py`,
 - Dev compose credentials and npm dev-only advisories: known items carried
   over from Phase 1.5 (`docs/security/PHASE1_SECURITY_REVIEW.md`), unchanged.
 
-## Out of scope (per Phase 2 boundaries)
+## Scope note (updated Phase 3+)
 
-Windows collectors, AD integration, remote automation/patching, vulnerability
-scanning, network/DNS monitoring — none implemented; server has **no command
-execution endpoint** at all, so adding one later is a deliberate design
-decision, not an existing surface.
+This document's threat model covers the endpoint-agent surface
+(identity separation, enrollment abuse, revocation, input hardening).
+Module-specific security behavior lives with each module:
+
+- **Windows collectors** are implemented — see
+  `docs/endpoints/windows-collector.md` (incl. its explicit
+  "not validated on a live Windows host" caveat).
+- **AD integration** is implemented read-only — see
+  `docs/architecture/security.md` and `docs/active-directory/README.md`.
+- Remote automation/patching, vulnerability scanning, and network/DNS
+  monitoring remain **not implemented**; the server has **no command
+  execution endpoint** at all, so adding one later is a deliberate
+  design decision, not an existing surface.

@@ -82,7 +82,7 @@ npx playwright install chromium  # once (add --with-deps where sudo allows)
 node scripts/screenshots.mjs     # login + every page × dark/light × 4 viewports
 ```
 
-Output: 57 PNGs in `docs/screenshots/` (see
+Output: 63 PNGs in `docs/screenshots/` (see
 `docs/frontend/design-system.md` for the matrix and limitations).
 
 ## Static analysis
@@ -117,4 +117,13 @@ pytest --cov=app --cov-report=term-missing
 ```
 
 Target: ≥70% overall, ≥80% for `app/core` + auth paths (enforced as the
-suite grows; current Phase-1 core paths are fully exercised).
+suite grows; current core paths are fully exercised).
+
+Not covered by pytest by design (verified as live procedures instead):
+
+- **Backup → restore round-trip** — run
+  [runbooks/backup-scheduling.md](runbooks/backup-scheduling.md) +
+  [runbooks/database-restoration.md](runbooks/database-restoration.md)
+  against disposable infrastructure (real-verified in Phase 4).
+- Production HTTPS/cookie behavior — see
+  [deployment/README.md](deployment/README.md#validation-checklist-fresh-environment).

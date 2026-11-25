@@ -82,7 +82,7 @@ if you find one, treat it as a bug and rotate it.
 ## Still stuck
 
 1. Capture: `docker compose ps`, the failing request's timestamp +
-   `request_id` from logs, `alembic current`, and `/health/ready` output.
+   `event_type` from logs, `alembic current`, and `/health/ready` output.
 2. Reproduce against a disposable stack (backup → restore → test) — never
    debug directly on production data.
 3. See [../architecture.md](../architecture.md) for ADRs that explain

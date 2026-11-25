@@ -4,14 +4,18 @@ EITOP is an open-source, modular enterprise IT operations platform for endpoint
 inventory, security compliance, vulnerability management, network operations,
 and IT automation.
 
-> **Status:** Phase 3.2.3 — foundation, endpoint operations, and the
+> **Status:** Phases 1–5 complete — foundation, endpoint operations,
 > read-only Active Directory module (sync, inventory, security findings,
-> insights) are implemented with real backend data. Administration remains
-> marked "Soon" in the UI until implemented.
+> insights), production deployment/hardening, and full documentation.
+> Administration UI remains marked "Soon" in the UI (the administration
+> **API** is live). See [docs/architecture/README.md](docs/architecture/README.md)
+> for the system overview.
+
+![Dashboard](docs/screenshots/dashboard--light--1280x800.png)
 
 ## Features
 
-### Platform core (Phase 1)
+### Platform core
 
 - FastAPI backend with versioned REST API (`/api/v1`)
 - Argon2id password hashing, JWT access tokens, rotating refresh tokens
@@ -25,7 +29,7 @@ and IT automation.
 - Redis-backed rate limiting on auth endpoints (fails closed; proxy
   overwrites `X-Forwarded-For` so the key cannot be spoofed)
 
-### Endpoint operations (Phase 2)
+### Endpoint operations
 
 - Linux agent and Windows collector: inventory, heartbeat, enrollment,
   secure communication with the platform
@@ -34,7 +38,7 @@ and IT automation.
 - React + TypeScript + Vite + Tailwind CSS + TanStack Query frontend with
   an enterprise design system (light/dark themes)
 
-### Active Directory — read-only (Phase 3)
+### Active Directory — read-only
 
 - LDAP/LDAPS connections (secrets Fernet-encrypted, never exposed by the API)
 - Synchronization engine with lifecycle hardening: category tracking,
@@ -48,13 +52,46 @@ and IT automation.
 - Correlation Gaps tab: never_reconciled / unmatched / ambiguous only,
   with unconfirmed candidates clearly labelled
 
-### Operations
+### Production & operations
 
-- Docker Compose stack (backend, worker, frontend, PostgreSQL, Redis with
-  requirepass; data services unpublished, backend loopback-only)
-- Alembic migrations, CI (ruff, mypy, pytest, frontend tests, Trivy scan),
-  full test suites for backend, frontend, Linux collector, and Windows
-  collector (Pester)
+- Docker Compose dev stack + production overlay: TLS edge proxy,
+  HTTP→HTTPS/HSTS, unpublished data services, resource limits, log
+  rotation, worker healthchecks, fail-fast production config validation
+- Encrypted, checksummed PostgreSQL backups with retention and a
+  verified restore procedure
+- 16 operational runbooks (deployment, enrollment, AD, backups,
+  upgrades, secret rotation, incident response, …)
+
+![Login](docs/screenshots/login--light--1280x800.png)
+
+## Architecture (summary)
+
+Modular monolith in Docker Compose: React SPA behind an nginx TLS proxy,
+FastAPI API + Celery worker/beat sharing one codebase, PostgreSQL as
+system of record, Redis as broker/rate-limiter, and push-based
+collectors. No Kubernetes, no microservices, no external SaaS.
+
+```mermaid
+flowchart LR
+    U[Browser] -->|HTTPS| P[nginx edge]
+    C[Collectors] -->|HTTPS| P
+    P --> F[frontend]
+    P --> B[backend]
+    B <--> D[(PostgreSQL)]
+    B <--> R[(Redis)]
+    R --> W[worker/beat]
+    W <--> D
+    W -->|LDAPS read only| AD[Active Directory]
+```
+
+Details: [docs/architecture/README.md](docs/architecture/README.md) ·
+[data flows](docs/architecture/data-flow.md) ·
+[security model](docs/architecture/security.md).
+
+## Prerequisites
+
+- Docker + Docker Compose ≥ 2.24 (production overlay uses `!override`)
+- For host-based development only: Python 3.12, Node 20+, PostgreSQL, Redis
 
 ## Quick start (Docker)
 
@@ -65,6 +102,10 @@ docker compose up --build
 
 - Frontend: http://localhost:8080
 - Backend API + OpenAPI docs: http://localhost:8000/docs
+- First admin: see
+  [docs/runbooks/administrator-bootstrap.md](docs/runbooks/administrator-bootstrap.md)
+
+Full install guide: [docs/installation/README.md](docs/installation/README.md).
 
 ## Quick start (local development)
 
@@ -86,6 +127,15 @@ npm install
 npm run dev                    # http://localhost:5173 (proxies /api to :8000)
 ```
 
+## Production
+
+```bash
+cp .env.example .env && chmod 600 .env   # APP_ENV=production, strong secrets
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+Step-by-step: [docs/installation/production.md](docs/installation/production.md).
+
 ## Tests
 
 ```bash
@@ -95,24 +145,28 @@ cd collectors/linux && .venv/bin/pytest
 cd collectors/windows && Invoke-Pester -Path ./tests
 ```
 
+Full gates and CI: [docs/testing.md](docs/testing.md).
+
 ## Documentation
 
-| Document | Path |
+| Area | Document |
 |---|---|
-| Architecture | [docs/architecture.md](docs/architecture.md) |
-| Installation | [docs/installation.md](docs/installation.md) |
+| Architecture & data flows | [docs/architecture/](docs/architecture/) ([overview](docs/architecture/README.md) · [data-flow](docs/architecture/data-flow.md) · [security](docs/architecture/security.md)) |
+| Installation | [docs/installation/README.md](docs/installation/README.md) (dev) · [production.md](docs/installation/production.md) |
+| Configuration reference | [docs/configuration/README.md](docs/configuration/README.md) |
+| API & permissions | [docs/api/README.md](docs/api/README.md) |
+| Runbooks (operations) | [docs/runbooks/README.md](docs/runbooks/README.md) |
+| Collectors | [docs/collectors/README.md](docs/collectors/README.md) |
+| Active Directory | [docs/active-directory/README.md](docs/active-directory/README.md) |
+| Deployment & backups | [docs/deployment/](docs/deployment/) ([runbook](docs/deployment/README.md) · [backup-restore](docs/deployment/backup-restore.md)) |
+| Troubleshooting | [docs/troubleshooting/README.md](docs/troubleshooting/README.md) |
 | Local development | [docs/local-development.md](docs/local-development.md) |
-| Environment variables | [docs/environment-variables.md](docs/environment-variables.md) |
-| Database migrations | [docs/database-migrations.md](docs/database-migrations.md) |
 | Authentication flow | [docs/authentication.md](docs/authentication.md) |
 | RBAC model | [docs/rbac.md](docs/rbac.md) |
-| API documentation | [docs/api.md](docs/api.md) |
+| Database migrations | [docs/database-migrations.md](docs/database-migrations.md) |
 | Running tests | [docs/testing.md](docs/testing.md) |
 | Endpoint & agent docs | [docs/endpoints/](docs/endpoints/) |
 | Frontend design system | [docs/frontend/design-system.md](docs/frontend/design-system.md) |
-| Deployment | [docs/deployment/](docs/deployment/) |
-| Troubleshooting | [docs/troubleshooting/](docs/troubleshooting/) |
-| User guides | [docs/user-guides/](docs/user-guides/) |
 | Phase 1 security review | [docs/security/PHASE1_SECURITY_REVIEW.md](docs/security/PHASE1_SECURITY_REVIEW.md) |
 | UI screenshots | [docs/screenshots/](docs/screenshots/) |
 
@@ -120,6 +174,8 @@ cd collectors/windows && Invoke-Pester -Path ./tests
 
 Report vulnerabilities per [SECURITY.md](SECURITY.md). Never commit secrets;
 all configuration is via environment variables (see `.env.example`).
+Limitations and verified/unverified status:
+[docs/architecture/security.md](docs/architecture/security.md#explicit-limitations).
 
 ## License
 

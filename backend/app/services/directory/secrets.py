@@ -1,6 +1,6 @@
 """Encryption-at-rest for directory bind passwords (Phase 3.1).
 
-Design (documented in docs/directory/active-directory.md):
+Design (documented in docs/active-directory/README.md):
 - Key derivation: HKDF-SHA256 over the existing ``SECRET_KEY`` with info
   string ``eitop-directory-credential-v1`` — no new environment variable.
 - Cipher: Fernet (AES-128-CBC + HMAC-SHA256), authenticated.

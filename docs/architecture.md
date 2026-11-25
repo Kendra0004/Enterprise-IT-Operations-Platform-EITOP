@@ -61,8 +61,16 @@ packages preserve a path to later extraction.
    than silently disabling brute-force protection.
 5. **Errors are RFC 9457 `application/problem+json`** everywhere, including
    validation errors.
+6. **Directory syncs are single-flight per connection** — a database lease
+   guarantees one sync at a time; leases expire
+   (`DIRECTORY_STALE_RUN_MINUTES`) so a dead worker cannot wedge a
+   connection, and `DIRECTORY_MAX_SYNC_MINUTES` caps any run.
+7. **Collectors push; the platform never dials endpoints** — enrollment
+   issues a per-endpoint credential, agents submit heartbeat/inventory
+   over HTTPS, and inventory ingestion is idempotent (current-state
+   upsert + content-hash-deduplicated immutable snapshots).
 
-## Data model (Phase 1)
+## Data model
 
 ```
 users ──< user_roles >── roles ──< role_permissions >── permissions
@@ -70,9 +78,22 @@ users ──< refresh_tokens (token_hash, family_id, revoked_at)
 users ──< audit_logs (event_type, outcome, ip, detail)
 ```
 
-Later phases add endpoint inventory, AD snapshots, compliance results,
-vulnerabilities, network devices, DNS checks, automation jobs, assets —
-each as its own table group without altering the auth core.
+Built on top of that auth core (migrations `0002`–`0007`):
+
+- **Endpoints:** `endpoints`, `enrollment_tokens`, `endpoint_credentials`,
+  `endpoint_groups`, inventory tables (`endpoint_metadata`,
+  `endpoint_facts`, `endpoint_software`), snapshots
+  (`endpoint_snapshots`, `endpoint_snapshot_software`).
+- **Directory:** `directory_connections`, domains/OUs/users/groups/
+  computers, `directory_sync_runs`, `directory_reconciliations`,
+  `directory_findings`.
+
+Planned-but-unbuilt modules (vulnerabilities, network devices, DNS
+checks, automation jobs) will follow the same table-group pattern
+without altering the auth core. See
+[architecture/README.md](architecture/README.md) for the component
+overview and [architecture/data-flow.md](architecture/data-flow.md) for
+flows.
 
 ## Scalability path
 

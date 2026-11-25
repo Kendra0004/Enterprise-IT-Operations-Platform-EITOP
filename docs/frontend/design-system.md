@@ -148,7 +148,7 @@ node scripts/screenshots.mjs     # writes ../docs/screenshots/*.png
 
 The script logs in through the real UI and captures every page ×
 {dark, light} × {1440×900, 1280×800, 768×1024, 390×844} plus an open
-mobile drawer (57 PNGs). Credentials default to the bootstrap admin and
+mobile drawer (63 PNGs). Credentials default to the bootstrap admin and
 can be overridden with `EITOP_URL`, `EITOP_EMAIL`, `EITOP_PASSWORD`.
 
 ## Limitations (honest)

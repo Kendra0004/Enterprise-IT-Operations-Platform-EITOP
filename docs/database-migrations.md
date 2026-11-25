@@ -25,7 +25,7 @@ Migrations run automatically on container start (`backend/entrypoint.sh`).
 
 ## Conventions
 
-- Revision IDs: sequential, readable (`0001_initial`, `0002_endpoints`).
+- Revision IDs: sequential, readable (`0001_initial`, `0003_endpoints`).
 - Additive-only in normal PRs. Dropping/renaming a column requires an ADR
   and a documented rollback plan.
 - Every migration defines both `upgrade()` and `downgrade()`.

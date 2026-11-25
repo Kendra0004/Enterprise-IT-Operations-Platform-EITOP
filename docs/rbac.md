@@ -14,10 +14,10 @@ permission passes.
 
 | Role | Permissions |
 |---|---|
-| `admin` | `admin:read`, `admin:write`, `audit:read` |
-| `security_auditor` | `audit:read`, `endpoints:read`, `security:read`, `vulns:read`, `network:read`, `assets:read`, `reports:read` |
-| `operator` | `endpoints:read/write`, `network:read`, `automation:read/execute`, `assets:read/write`, `reports:read` |
-| `readonly` | `endpoints:read`, `security:read`, `vulns:read`, `network:read`, `assets:read`, `reports:read` (no `:write` anywhere) |
+| `admin` | `admin:read`, `admin:write`, `audit:read`, `endpoints:read`, `endpoints:write`, `directory:read`, `directory:write`, `directory:sync` |
+| `security_auditor` | `audit:read`, `endpoints:read`, `directory:read`, `security:read`, `vulns:read`, `network:read`, `assets:read`, `reports:read` |
+| `operator` | `endpoints:read/write`, `directory:read`, `network:read`, `automation:read/execute`, `assets:read/write`, `reports:read` |
+| `readonly` | `endpoints:read`, `directory:read`, `security:read`, `vulns:read`, `network:read`, `assets:read`, `reports:read` (no `:write` anywhere) |
 | `agent` | `endpoints:write` (collector identity, report-only) |
 
 Full catalog lives in `backend/app/db/seed.py` (`PERMISSIONS`), seeded
@@ -49,5 +49,10 @@ def create_thing(admin: AdminWrite) -> ...:
    simply holds all `admin:*` grants.
 3. New modules add their permission strings to `PERMISSIONS` and assign
    them to roles in the same PR — never hardcode role names in routes.
-4. `agent` role exists for future endpoint collectors: it can report
-   inventory (`endpoints:write`) but read nothing.
+4. `agent` role accompanies the collector identity: it can report
+   inventory (`endpoints:write`) but read nothing. Collectors themselves
+   authenticate with endpoint credentials (`eitop_ep_…`), not user
+   logins — do not assign `agent` to humans.
+
+The full role × permission matrix lives in
+[api/README.md](api/README.md#permission-matrix).
