@@ -5,8 +5,9 @@ FROM python:3.12-slim AS runtime
 # gate (trivy, HIGH/CRITICAL, ignore-unfixed) fails on base-image CVEs until
 # the layer below is applied. Keep narrow: only packages with fixable
 # findings, upgraded from trixie-security.
+# History: zlib1g (CVE-2026-*), libzstd1 (CVE-2026-124851 -> deb13u1).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends --only-upgrade zlib1g \
+    && apt-get install -y --no-install-recommends --only-upgrade zlib1g libzstd1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Run as non-root
