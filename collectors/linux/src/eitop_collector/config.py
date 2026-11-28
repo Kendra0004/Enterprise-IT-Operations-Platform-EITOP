@@ -7,10 +7,13 @@ separately with restrictive permissions (see credentials.py).
 
 from __future__ import annotations
 
+import ipaddress
 import os
+import stat
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 DEFAULT_CONFIG_PATHS = (
     "/etc/eitop/collector.toml",
@@ -20,6 +23,54 @@ DEFAULT_CONFIG_PATHS = (
 
 class ConfigError(Exception):
     """Invalid or missing configuration."""
+
+
+def is_loopback_host(host: str | None) -> bool:
+    """True for localhost / 127.0.0.0/8 / ::1 — the only hosts allowed
+    to speak plaintext http (Phase 6 audit L1)."""
+    if not host:
+        return False
+    name = host.lower().strip("[]")
+    if name == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_server_url(url: str) -> str:
+    """Enforce the transport policy: https everywhere except loopback.
+
+    The collector sends the endpoint credential as a bearer token — over
+    plain http to a remote host that credential is sniffable in transit.
+    Returns the normalized URL (trailing slash stripped).
+    """
+    normalized = url.rstrip("/")
+    parsed = urlsplit(normalized)
+    if parsed.scheme not in ("http", "https"):
+        raise ConfigError(f"server_url must be http(s), got: {redact_url(url)!r}")
+    if parsed.scheme == "http" and not is_loopback_host(parsed.hostname):
+        raise ConfigError(
+            "server_url must use https for non-loopback hosts "
+            f"(plaintext http is only allowed for localhost): {redact_url(url)!r}"
+        )
+    return normalized
+
+
+def redact_url(url: str) -> str:
+    """Strip userinfo (user:password@) before a URL can reach a log or an
+    error message (Phase 6 audit L7)."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "<unparseable-url>"
+    if parts.username or parts.password:
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        return f"{parts.scheme}://***:***@{host}"
+    return url
 
 
 @dataclass(frozen=True)
@@ -32,9 +83,7 @@ class CollectorConfig:
     credential_file: str = "/var/lib/eitop/credentials.json"
 
     def __post_init__(self) -> None:
-        url = self.server_url.rstrip("/")
-        if not url.startswith(("http://", "https://")):
-            raise ConfigError(f"server_url must be http(s), got: {url!r}")
+        url = validate_server_url(self.server_url)
         if self.interval_seconds < 10:
             raise ConfigError("interval_seconds must be >= 10")
         if self.heartbeat_interval_seconds < 10:
@@ -73,6 +122,19 @@ def load_config(path: str | Path | None = None) -> CollectorConfig:
         raise ConfigError(
             "No config file found. Pass --config, set EITOP_CONFIG, or create "
             "/etc/eitop/collector.toml (see config.example.toml)."
+        )
+
+    # Phase 6 audit L2: the config carries server_url (where credentials
+    # get sent) — a group/other-writable file lets any local user retarget
+    # enrollment and harvest the issued credential. Refuse to load it.
+    try:
+        mode = stat.S_IMODE(chosen.stat().st_mode)
+    except OSError as exc:
+        raise ConfigError(f"Cannot stat config {chosen}: {exc}") from exc
+    if mode & 0o022:
+        raise ConfigError(
+            f"Config {chosen} is writable by group/other "
+            f"({oct(mode)}); run: chmod 644 {chosen}"
         )
 
     try:

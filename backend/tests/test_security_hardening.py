@@ -7,7 +7,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from tests.conftest import requires_postgres
+from tests.conftest import requires_postgres, requires_redis
 
 PASSWORD = "Str0ng!Passw0rd#2026"
 
@@ -274,3 +274,124 @@ def test_seed_cli_has_no_password_argument():
     assert proc.stdout.count("--admin-password-stdin") == 2
     sans = proc.stdout.replace("--admin-password-stdin", "")
     assert "--admin-password" not in sans
+
+
+# --- Phase 6 hardening -------------------------------------------------------
+
+
+def test_cross_site_sec_fetch_site_rejected(client, admin_user):
+    """A7: browsers label cross-site requests via Sec-Fetch-Site; a request
+    carrying it must be refused even when no Origin header arrives."""
+    resp = client.post(
+        "/api/v1/auth/login",
+        json={"email": admin_user.email, "password": PASSWORD},
+        headers={"Sec-Fetch-Site": "cross-site"},
+    )
+    assert resp.status_code == 403
+    assert resp.json()["title"] == "Cross-origin request rejected"
+
+
+def test_chunked_request_body_rejected_with_411(client, admin_user):
+    """A8: chunked bodies carry no Content-Length and previously skipped
+    every 413 limit; the API refuses them outright."""
+    body = iter(
+        [b'{"email":"a@b.example","password":"x"']
+    )
+    resp = client.post(
+        "/api/v1/auth/login",
+        content=body,
+        headers={"Content-Type": "application/json"},
+    )
+    assert resp.status_code == 411
+    assert resp.json()["title"] == "Length required"
+
+
+@requires_postgres
+def test_request_id_header_synthesized_not_trusted(client):
+    """F15: X-Request-ID is generated per request; inbound values are
+    ignored so a client cannot poison correlation or log pipelines."""
+    resp = client.get("/health")
+    rid = resp.headers.get("X-Request-ID")
+    assert rid and len(rid) == 32
+    assert all(c in "0123456789abcdef" for c in rid)
+
+    resp = client.get("/api/v1/auth/me")  # error responses carry it too
+    assert resp.headers.get("X-Request-ID")
+
+    resp = client.get(
+        "/health", headers={"X-Request-ID": "attacker-controlled"}
+    )
+    assert resp.headers["X-Request-ID"] != "attacker-controlled"
+
+
+def test_json_logs_carry_request_id_only_during_request():
+    """F15: the correlation id reaches JSON log lines while handling a
+    request and never leaks into background logs."""
+    import io
+    import json
+    import logging
+
+    from app.core.logging import JsonFormatter, request_id_var
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(JsonFormatter())
+    logger = logging.getLogger("tests.request_id")
+    logger.handlers = [handler]
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+
+    token = request_id_var.set("abc123def456")
+    try:
+        logger.info("during-request")
+    finally:
+        request_id_var.reset(token)
+    logger.info("background")
+
+    lines = [json.loads(x) for x in stream.getvalue().splitlines()]
+    assert lines[0]["request_id"] == "abc123def456"
+    assert "request_id" not in lines[1]
+
+
+@requires_redis
+def test_login_throttled_per_account_across_source_ips(
+    client, monkeypatch
+):
+    """A6: the per-account bucket caps credential stuffing spread across
+    many source IPs (each attempt comes from a fresh 'IP')."""
+    import itertools
+    import uuid as _uuid
+
+    import app.core.rate_limit as rl
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    # The tester compose service deliberately inflates the global login
+    # limit to 100000 so unrelated tests never trip it — pin a small
+    # limit for this test instead of trusting the environment.
+    limit = 3
+    monkeypatch.setattr(settings, "rate_limit_login_per_minute", limit)
+
+    counter = itertools.count()
+
+    def varying_ip(request):
+        n = next(counter)
+        return f"10.{(n >> 16) & 255}.{(n >> 8) & 255}.{n & 255}"
+
+    monkeypatch.setattr(rl, "client_ip", varying_ip)
+
+    # Fresh unknown account → unique email bucket, uniform 401s
+    email = f"rl-{_uuid.uuid4().hex[:12]}@example.com"
+    for attempt in range(limit):
+        resp = client.post(
+            "/api/v1/auth/login",
+            json={"email": email, "password": "wrong-password"},
+        )
+        assert resp.status_code == 401, (
+            f"attempt {attempt} unexpectedly {resp.status_code}"
+        )
+    resp = client.post(
+        "/api/v1/auth/login",
+        json={"email": email, "password": "wrong-password"},
+    )
+    assert resp.status_code == 429

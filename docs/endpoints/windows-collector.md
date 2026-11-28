@@ -20,13 +20,16 @@ endpoint-credential lifecycle unchanged (`docs/endpoints/api.md`).
 1. Copy `collectors/windows/` to the host (e.g.
    `C:\Program Files\EITOP\collector\`).
 2. `Copy-Item config.example.json C:\ProgramData\EITOP\collector.json`
-3. Edit `server_url` (HTTPS required in production).
+3. Edit `server_url` — `https://` is **enforced** for non-loopback hosts
+   (plaintext `http://` accepted only for `localhost`/`127.x`/`::1`).
 4. Create a dedicated service account and restrict
    `C:\ProgramData\EITOP\` to it (`icacls ... /inheritance:r /grant:r
    "<SID>:(OI)(CI)F"`).
-5. ExecutionPolicy: `-ExecutionPolicy Bypass` on the scheduled-task
-   argument, or sign the scripts with your org's code-signing cert
-   (`Set-AuthenticodeSignature`).
+5. ExecutionPolicy: prefer `-ExecutionPolicy RemoteSigned` on the
+   scheduled-task argument (local scripts run; downloads must be signed),
+   or sign the scripts with your org's code-signing cert
+   (`Set-AuthenticodeSignature`). Avoid `Bypass` unless the script is
+   unsigned and network-sourced.
 
 No admin rights needed for routine collection (see Permissions).
 
@@ -36,11 +39,11 @@ No admin rights needed for routine collection (see Permissions).
 
 | Key | Default | Meaning |
 |---|---|---|
-| `server_url` | — (required) | EITOP base URL; http(s) only |
+| `server_url` | — (required) | EITOP base URL; `https://` required except loopback (`http://` allowed only for localhost/127.x/::1) |
 | `interval_seconds` | 300 | full inventory period (min 10) |
 | `heartbeat_interval_seconds` | 60 | heartbeat period (min 10) |
 | `timeout_seconds` | 30 | per-request timeout |
-| `max_retries` | 5 | HTTP retries 1–10 (backoff 1s·2ⁿ cap 60s) |
+| `max_retries` | 5 | HTTP retries 1–10 (backoff 1s·2ⁿ cap 60s); enrollment is never retried (single-use token) |
 | `credential_file` | `%ProgramData%\EITOP\credentials.json` | DPAPI-protected credential |
 
 Env overrides: `EITOP_CONFIG` (config path), `EITOP_SERVER_URL` (URL).
@@ -73,9 +76,16 @@ HTTPS termination in production):
    `ConvertTo-SecureString`. On Windows this is the platform DPAPI: the
    ciphertext is bound to the **Windows identity** that created it. Another
    account (or an offline reader of the file) cannot decrypt it.
-2. **ACL** — the credential file and its directory are locked to the
-   service account's SID only (`icacls /inheritance:r /grant:r SID:F`), and
-   loading **refuses** files whose ACL exposes other principals.
+   **Windows-only by design**: on non-Windows hosts the protector throws
+   (`DPAPI is Windows-only`) instead of silently storing reversible
+   obfuscation that any same-host process could decode.
+2. **ACL** — the credential file **and its parent directory** are locked to
+   the service account's SID only (`icacls /inheritance:r /grant:r SID:F`,
+   applied on every save, not only when the directory was newly created),
+   and loading **refuses** either when the file's or the directory's ACL
+   exposes other principals. ACL verification reads the structured ACL
+   (`Get-Acl`) — every rule (allow/deny, named or numeric SID) must resolve
+   to the current SID, and an unresolvable principal fails closed.
 
 Consequences (by design):
 
@@ -90,10 +100,12 @@ Consequences (by design):
 - Never hardcoded, never printed, never in arguments, never logged —
   enforced by hygiene tests over code (comments excluded).
 
-Documented test-platform caveat: unit tests run DPAPI seams on Linux pwsh,
-where `ConvertFrom-SecureString` uses a platform-specific local protector —
-round-trip semantics are verified, but **Windows DPAPI itself is only
-verifiable on Windows** (see Manual validation §6).
+Documented test-platform caveat: unit tests run on Linux pwsh, where
+`Protect/Unprotect-EitopSecret` correctly **refuse** to run (W2). The
+Save/Read logic (atomicity, refusal paths, payload shape) is therefore
+exercised against a mocked protector, and the platform guard itself is
+tested unmocked — **Windows DPAPI itself is only verifiable on Windows**
+(see Manual validation §6).
 
 ## Execution
 
@@ -143,10 +155,14 @@ state (enforced by test on serialized output).
 Identical contract to the Linux agent: enroll / heartbeat / inventory /
 rotate-credential, JSON via `ConvertTo-Json -Depth 8`, bearer credential
 header only, RFC 9457 problem parsing, timeouts, exponential backoff with
-capped retries (429/5xx/network retried; other 4xx fail fast), TLS 1.2
-pinned for PS 5.1. Server responses are never interpreted as commands
-(static test: no `Invoke-Expression`/`iex`/`Add-Type -TypeDefinition` in
-any code path).
+capped retries (429/5xx/network retried; other 4xx fail fast; enrollment
+never retried), TLS 1.2 pinned exactly for PS 5.1, and **redirects refused**
+(`3xx` → error, the default invoker passes `-MaximumRedirection 0`) so a
+response can never steer the bearer credential to another origin. Error and
+warning text carries path/status/attempt plus a control-character-stripped,
+length-capped cause — remote text cannot forge log lines. Server responses
+are never interpreted as commands (static test: no
+`Invoke-Expression`/`iex`/`Add-Type -TypeDefinition` in any code path).
 
 ## Permissions
 
@@ -166,20 +182,26 @@ any code path).
 | `config error: No config file found` | pass `-Config`, set `EITOP_CONFIG`, or create `%ProgramData%\EITOP\collector.json` |
 | `credential file ... cannot be decrypted under the current identity` | collector runs as a different account than at enrollment → re-enroll as the service account |
 | `credential file ... accessible to other principals` | ACL widened (restore: `icacls <file> /inheritance:r /grant:r "<SID>:F"`) |
+| `Directory ... accessible to other principals` | parent directory ACL widened (restore: `icacls <dir> /inheritance:r /grant:r "<SID>:(OI)(CI)F"`) |
+| `server_url must use https for non-loopback hosts` | plaintext remote URL rejected — use `https://` (http only allowed for localhost) |
+| `DPAPI is Windows-only` | protector invoked off-Windows (expected in Linux test hosts; production runs on Windows) |
 | `HTTP 401: Not authenticated` in loop, then stop | credential revoked/rotated server-side → re-enroll or restore correct credential file |
 | `HTTP 401: Invalid enrollment token` | token already used / expired / hostname restriction mismatch → mint a new token |
 | `HTTP 429` during enroll | server rate limit (per-IP/min) → wait a minute |
 | `Giving up after N attempts` | server unreachable → check `server_url`, TLS, firewall; collector retries with backoff up to 1 h |
 | empty `packages` | neither uninstall hive readable or enumerated 0 apps — verify `reg query HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall` |
-| `execution blocked by policy` | ExecutionPolicy → use `-ExecutionPolicy Bypass` or code signing |
+| `execution blocked by policy` | ExecutionPolicy → prefer `-ExecutionPolicy RemoteSigned` (or code signing); `Bypass` disables protection entirely |
 
 ## Testing
 
-Pester (5.5+): `Invoke-Pester -Path ./tests -CI` — 113 tests over parsing
-fixtures, registry-dedup cases, API retry behavior, credential refusal
-paths, JSON contract shape, and static hygiene rules (no `Win32_Product`,
+Pester (5.5+ / 6.x): `Invoke-Pester -Path ./tests -CI` — 133 tests over
+parsing fixtures, registry-dedup cases, API retry behavior, redirect/TLS
+policy, credential refusal paths (file + directory ACL, platform guard),
+JSON contract shape, and static hygiene rules (no `Win32_Product`,
 no `Invoke-Expression`, no secret printing, no token-as-parameter).
-No Windows machine required (verified with `pwsh 7.4.11` on Linux).
+No Windows machine required (verified with `pwsh 7.4.11` on Linux,
+Pester 6.2: 131 passed, 2 skipped — the skips are Windows-only
+assertions: SID object handling and the real DPAPI roundtrip).
 
 Static analysis: `Invoke-ScriptAnalyzer -Path . -Recurse -Settings
 ./PSScriptAnalyzerSettings.pse1 -Severity Warning,Error` → **clean**.
@@ -196,10 +218,11 @@ actually executed:
 
 | Verified | How |
 |---|---|
-| All 113 unit tests | `pwsh 7.4.11` on Linux, Pester 6.2 |
+| All 133 unit tests | `pwsh 7.4.11` on Linux, Pester 6.2 (131 passed, 2 Windows-only skipped) |
 | JSON payload shape vs backend Pydantic contract | tests + live Linux-agent E2E of the same contract |
 | Retry/backoff, problem parsing, flows, loops | mocked-invoker tests |
-| DPAPI seam round-trip | `ConvertFrom/To-SecureString` under pwsh (non-Windows protector) |
+| DPAPI platform guard (refuses off-Windows) | unmocked test on Linux |
+| Protector round-trip (Save/Read logic) | mocked protector seam (`TESTENC:` prefix) |
 
 **Unverified Windows-specific behavior (manual procedure below):**
 
@@ -225,7 +248,7 @@ enrollment token.
 2. **Identity**: create/use a dedicated standard account `eitop-svc`;
    restrict `C:\ProgramData\EITOP` to its SID only.
 3. **Enroll** (as `eitop-svc`, interactive):
-   `powershell -ExecutionPolicy Bypass -File .\eitop-collector.ps1 -Config ... enroll`
+   `powershell -ExecutionPolicy RemoteSigned -File .\eitop-collector.ps1 -Config ... enroll`
    → expect `enrolled endpoint_id=<uuid>`; verify
    `icacls credentials.json` lists only `eitop-svc`; open the file → no
    plaintext secret (DPAPI blob only).

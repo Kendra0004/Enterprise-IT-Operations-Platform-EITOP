@@ -13,7 +13,9 @@
 #   * frontend host port removed — static SPA reachable only via the proxy
 #   * TLS edge proxy added (80 → 443 redirect, HSTS)
 #   * resource limits + JSON log rotation on all long-running services
-#   * worker healthcheck (celery inspect ping)
+#     (worker healthcheck now lives in the base file — see F18)
+#   * REDIS_PASSWORD made mandatory (the base file falls back to a known
+#     dev password for redis --requirepass — see F10)
 #   * explicit APP_ENV/DEBUG/CORS for backend, worker, beat
 
 services:
@@ -36,12 +38,7 @@ services:
       DEBUG: "false"
       CORS_ORIGINS: ${CORS_ORIGINS:?set CORS_ORIGINS in .env (https:// origins, comma separated)}
     mem_limit: 2g                # membership rebuild + findings engine
-    healthcheck:
-      test: ["CMD-SHELL", "celery -A app.core.celery_app:celery_app inspect ping -d celery@$$HOSTNAME -t 5 2>/dev/null | grep -q pong"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
+    # Healthcheck inherits from the base file (PONG gate, F18).
     logging: *log-rotate
 
   beat:
@@ -58,6 +55,13 @@ services:
     logging: *log-rotate
 
   redis:
+    environment:
+      # Phase 6 audit F10: the base compose interpolates
+      # ${REDIS_PASSWORD:-eitop-dev-redis} straight into redis-server's
+      # argv (--requirepass) and REDISCLI_AUTH — an operator who forgets
+      # to set REDIS_PASSWORD gets a publicly documented dev password on
+      # a production broker. `:?` fails the whole compose parse instead.
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set in .env for production}
     mem_limit: 512m
     logging: *log-rotate
     # NOTE: never enable maxmemory eviction policies (allkeys-*) here —
@@ -71,7 +75,9 @@ services:
 
   # TLS-terminating edge proxy. Certificates live in ./certs (gitignored).
   proxy:
-    image: nginx:1.27-alpine
+    # Stable branch only, pinned like every other image we ship: 1.27 was
+    # a mainline release that left support when 1.29 superseded it.
+    image: nginx:1.30-alpine
     depends_on:
       frontend:
         condition: service_started
@@ -88,6 +94,7 @@ services:
     security_opt:
       - no-new-privileges:true
     read_only: true
+    mem_limit: 256m              # F12: every other service was capped
     tmpfs:
       - /var/cache/nginx
       - /var/run

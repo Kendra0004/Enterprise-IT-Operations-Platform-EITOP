@@ -99,23 +99,57 @@ Describe 'New-EitopConfig validation' {
     }
 
     It 'rejects intervals below the 10s floor' {
-        { New-EitopConfig -ServerUrl 'http://x' -IntervalSeconds 5 -CredentialFile 'x' } |
+        { New-EitopConfig -ServerUrl 'https://x' -IntervalSeconds 5 -CredentialFile 'x' } |
             Should -Throw -ExpectedMessage '*interval_seconds*'
-        { New-EitopConfig -ServerUrl 'http://x' -HeartbeatIntervalSeconds 5 -CredentialFile 'x' } |
+        { New-EitopConfig -ServerUrl 'https://x' -HeartbeatIntervalSeconds 5 -CredentialFile 'x' } |
             Should -Throw -ExpectedMessage '*heartbeat*'
     }
 
     It 'rejects out-of-range retries and timeouts' {
-        { New-EitopConfig -ServerUrl 'http://x' -MaxRetries 0 -CredentialFile 'x' } |
+        { New-EitopConfig -ServerUrl 'https://x' -MaxRetries 0 -CredentialFile 'x' } |
             Should -Throw -ExpectedMessage '*max_retries*'
-        { New-EitopConfig -ServerUrl 'http://x' -MaxRetries 99 -CredentialFile 'x' } |
+        { New-EitopConfig -ServerUrl 'https://x' -MaxRetries 99 -CredentialFile 'x' } |
             Should -Throw -ExpectedMessage '*max_retries*'
-        { New-EitopConfig -ServerUrl 'http://x' -TimeoutSeconds 0 -CredentialFile 'x' } |
+        { New-EitopConfig -ServerUrl 'https://x' -TimeoutSeconds 0 -CredentialFile 'x' } |
             Should -Throw -ExpectedMessage '*timeout*'
     }
 
     It 'normalizes trailing slashes on server_url' {
-        (New-EitopConfig -ServerUrl 'http://host:8080/' -CredentialFile 'x').server_url |
-            Should -Be 'http://host:8080'
+        (New-EitopConfig -ServerUrl 'https://host:8080/' -CredentialFile 'x').server_url |
+            Should -Be 'https://host:8080'
+    }
+
+    # Phase 6 audit W3: https everywhere except loopback.
+    It 'rejects plaintext http to a non-loopback host' {
+        { New-EitopConfig -ServerUrl 'http://server.example:8080' -CredentialFile 'x' } |
+            Should -Throw -ExpectedMessage '*https*'
+        { New-EitopConfig -ServerUrl 'http://10.0.0.5' -CredentialFile 'x' } |
+            Should -Throw -ExpectedMessage '*https*'
+    }
+
+    It 'allows plaintext http only for loopback hosts' {
+        (New-EitopConfig -ServerUrl 'http://localhost:8080/' -CredentialFile 'x').server_url |
+            Should -Be 'http://localhost:8080'
+        (New-EitopConfig -ServerUrl 'http://127.0.0.1:8000' -CredentialFile 'x').server_url |
+            Should -Be 'http://127.0.0.1:8000'
+        (New-EitopConfig -ServerUrl 'https://prod.example:8443' -CredentialFile 'x').server_url |
+            Should -Be 'https://prod.example:8443'
+    }
+
+    # Phase 6 audit L7-parity: userinfo must never reach an error message.
+    It 'redacts userinfo in validation errors' {
+        try {
+            New-EitopConfig -ServerUrl 'http://alice:hunter2@remote.example' -CredentialFile 'x'
+            throw 'expected validation failure'
+        } catch {
+            $_.Exception.Message | Should -Not -Match 'hunter2'
+            $_.Exception.Message | Should -Match '\*\*\*:\*\*\*@'
+        }
+        try {
+            New-EitopConfig -ServerUrl 'ftp://alice:hunter2@files.example' -CredentialFile 'x'
+            throw 'expected validation failure'
+        } catch {
+            $_.Exception.Message | Should -Not -Match 'hunter2'
+        }
     }
 }

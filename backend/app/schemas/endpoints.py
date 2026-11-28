@@ -371,7 +371,13 @@ class AgentInventoryRequest(BaseModel):
     hardware: HardwareReport | None = None
     network: NetworkReport | None = None
     filesystems: list[FilesystemReport] = Field(default_factory=list, max_length=64)
-    packages: list[PackageReport] = Field(default_factory=list, max_length=20000)
+    # Worst case per entry ≈ 500 B (255+128+32 char fields + JSON
+    # overhead): 10 000 packages ≈ 5.0 MB — the backend's 5 MB inventory
+    # cap is the authoritative limit, and nginx (10 m at edge and frontend)
+    # never clips before the backend does (Phase 6 audit F1). The previous
+    # 20 000 ceiling allowed ~9.2 MB payloads that the backend itself
+    # would reject with 413.
+    packages: list[PackageReport] = Field(default_factory=list, max_length=10000)
     facts: dict[str, str] = Field(default_factory=dict, max_length=512)
     # Optional history metadata (Phase 2.6). Backward compatible: existing
     # collectors omit both and receive server-side defaults.

@@ -4,7 +4,7 @@ Security properties:
 - Passwords hashed with Argon2id via argon2-cffi; plaintext never persisted.
 - Access tokens are short-lived HS256 JWTs signed with ``SECRET_KEY``.
 - Refresh tokens are opaque random strings; only their SHA-256 digest is
-  stored server-side (see services/token_service.py) so a DB leak does not
+  stored server-side (see services/auth_service.py) so a DB leak does not
   expose usable tokens.
 """
 

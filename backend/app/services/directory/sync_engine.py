@@ -242,9 +242,11 @@ def execute_sync(
         for name in PIPELINE:
             if results[name]["status"] in ("pending", "running"):
                 results[name] = {"status": "skipped"}
-        # Hard guarantee: a failed run marks nothing missing (the gate
-        # already prevents it; recording it keeps the artifact honest).
-        results["missing_scan"] = {"status": "skipped"}
+        # Phase 6 audit AD3: missing_scan is normalized by the loop above
+        # like every other stage. The previous unconditional overwrite
+        # erased a real ``failed`` label and rewrote a completed
+        # ``success`` to ``skipped`` when a later stage (reconcile) failed,
+        # making the persisted artifact lie about what ran.
         # Nothing was persisted (rollback): only "discovered" (entries
         # read from LDAP) remains a true statement about this attempt.
         counters["created"] = 0
@@ -271,7 +273,7 @@ def execute_sync(
         for name in PIPELINE:
             if results[name]["status"] in ("pending", "running"):
                 results[name] = {"status": "skipped"}
-        results["missing_scan"] = {"status": "skipped"}
+        # (missing_scan handled by the loop — see AD3 note above)
         counters["created"] = 0
         counters["updated"] = 0
         counters["marked_missing"] = 0

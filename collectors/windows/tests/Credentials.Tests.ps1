@@ -7,6 +7,32 @@ BeforeAll {
     Import-Module (Join-Path $script:Root 'modules/Credentials.psm1') -Force
     . (Join-Path $PSScriptRoot 'TestHelpers.ps1')
     $script:Cred = 'eitop_ep_livecredential0000000000000000000'
+
+    if (-not (Test-EitopIsWindows)) {
+        # Phase 6 audit W2: Protect/Unprotect-EitopSecret now THROW on
+        # non-Windows (ConvertFrom-SecureString there is reversible
+        # obfuscation, not DPAPI). These tests exercise Save/Read LOGIC
+        # (atomicity, ACL refusal, payload shape) on a non-Windows host,
+        # so the platform primitive is mocked HERE ONLY — the real
+        # platform guard itself is tested unmocked in
+        # Credentials.Platform.Tests.ps1.
+        Mock -ModuleName Credentials Protect-EitopSecret {
+            param($Secret)
+            $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Secret)
+            try {
+                $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+            } finally {
+                [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+            }
+            'TESTENC:' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($plain))
+        }
+        Mock -ModuleName Credentials Unprotect-EitopSecret {
+            param($Protected)
+            if (-not $Protected.StartsWith('TESTENC:')) { throw 'simulated decrypt failure' }
+            [Text.Encoding]::UTF8.GetString(
+                [Convert]::FromBase64String($Protected.Substring(8)))
+        }
+    }
 }
 
 Describe 'Save/Read roundtrip' {
@@ -61,6 +87,15 @@ Describe 'Save/Read roundtrip' {
 
 Describe 'Protect/Unprotect roundtrip (platform primitive)' {
     It 'converts a securestring to protected text and back' {
+        if (-not (Test-EitopIsWindows)) {
+            # W2: the real platform primitive refuses off-Windows, and the
+            # file-wide mock only intercepts module-internal calls (Save/
+            # Read roundtrips above) — the direct call hits the real guard.
+            # Windows behavior is exercised here; DPAPI itself remains
+            # documented-unverified on this CI host.
+            Set-ItResult -Skipped -Because 'DPAPI requires Windows (Phase 6 W2)'
+            return
+        }
         $protected = Protect-EitopSecret -Secret (ConvertTo-SecureString 'eitop_ep_secret' -AsPlainText -Force)
         $protected | Should -Not -Match 'eitop_ep_secret'
         Unprotect-EitopSecret -Protected $protected | Should -Be 'eitop_ep_secret'

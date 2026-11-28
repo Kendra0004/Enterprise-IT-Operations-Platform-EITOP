@@ -403,11 +403,14 @@ export function useSyncRuns(params: SyncRunListParams = {}) {
   });
 }
 
-export function useSyncRun(id: string | null) {
+export function useSyncRun(id: string | null, connectionId: string) {
   return useQuery({
-    queryKey: ["directory", "sync-runs", id],
-    queryFn: () => api.get<SyncRunDetail>(`/directory/sync-runs/${id}`),
-    enabled: Boolean(id),
+    queryKey: ["directory", "sync-runs", id, connectionId],
+    queryFn: () =>
+      api.get<SyncRunDetail>(`/directory/sync-runs/${id}`, {
+        query: { connection_id: connectionId },
+      }),
+    enabled: Boolean(id) && Boolean(connectionId),
   });
 }
 
@@ -474,11 +477,13 @@ export function useTriggerSync() {
   });
 }
 
-export function useDecideMatch(computerId: string) {
+export function useDecideMatch(computerId: string, connectionId: string) {
   const invalidate = useDirectoryInvalidation();
   return useMutation({
     mutationFn: (payload: MatchDecision) =>
-      api.post<ReconciliationRow>(`/directory/computers/${computerId}/match`, payload),
+      api.post<ReconciliationRow>(`/directory/computers/${computerId}/match`, payload, {
+        query: { connection_id: connectionId },
+      }),
     onSuccess: invalidate,
   });
 }

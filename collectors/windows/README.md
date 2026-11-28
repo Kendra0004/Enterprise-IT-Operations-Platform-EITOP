@@ -38,7 +38,7 @@ fixtures/                  CIM/registry fixture data
 # 1. Copy the collector (e.g. under C:\Program Files\EITOP\collector)
 # 2. Configuration:
 Copy-Item config.example.json C:\ProgramData\EITOP\collector.json
-notepad C:\ProgramData\EITOP\collector.json   # set server_url (HTTPS in prod)
+notepad C:\ProgramData\EITOP\collector.json   # set server_url (see Transport)
 
 # 3. Restrict the config directory to the service account:
 icacls C:\ProgramData\EITOP /inheritance:r /grant:r "<SID>:(OI)(CI)F"
@@ -65,9 +65,14 @@ $env:EITOP_ENROLL_TOKEN = '<raw token>'
 '<raw token>' | .\eitop-collector.ps1 -Config ... enroll -TokenStdin
 ```
 
-The token works exactly once. The issued credential is stored encrypted
-(DPAPI CurrentUser) at `credential_file` with an ACL limited to the current
-SID. The raw credential is never printed again — only at issuance by the API.
+The token works exactly once (never retried across ambiguous failures).
+The issued credential is stored encrypted
+(DPAPI CurrentUser) at `credential_file` with an ACL limiting both the file
+**and its parent directory** to the current SID; a shared/inherited ACL on
+either is refused at load. On non-Windows hosts the protector refuses to
+run (Windows-only, Phase 6 W2) instead of silently degrading to reversible
+obfuscation. The raw credential is never printed again — only at issuance
+by the API.
 
 ## Run
 
@@ -83,11 +88,15 @@ Scheduled task / service example (Task Scheduler, run as service account):
 
 ```powershell
 $action  = New-ScheduledTaskAction -Execute 'powershell.exe' `
-    -Argument '-NoProfile -ExecutionPolicy Bypass -File "C:\Program Files\EITOP\collector\eitop-collector.ps1" -Config C:\ProgramData\EITOP\collector.json run'
+    -Argument '-NoProfile -ExecutionPolicy RemoteSigned -File "C:\Program Files\EITOP\collector\eitop-collector.ps1" -Config C:\ProgramData\EITOP\collector.json run'
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $principal = New-ScheduledTaskPrincipal -UserId '<service-account>' -LogonType Password -RunLevel Limited
 Register-ScheduledTask -TaskName 'EITOP Collector' -Action $action -Trigger $trigger -Principal $principal
 ```
+
+Prefer `RemoteSigned` (local scripts run; downloaded scripts must be
+signed) over `Bypass`, which disables policy checking entirely — `Bypass`
+is only warranted for unsigned scripts pulled from network shares.
 
 `-RunLevel Limited`: inventory collection does **not** require permanent
 administrator rights (DMI/serial-equivalents read via standard CIM;
@@ -95,11 +104,23 @@ registry uninstall keys are user-readable machine hives).
 
 ## Behavior
 
+- **Transport:** `server_url` must be `https://` — plaintext `http://` is
+  accepted only for loopback hosts (`localhost`, `127.x`, `::1`) for local
+  dev stacks. The endpoint credential travels as a bearer token, so a
+  remote plaintext hop would be sniffable.
+- **No redirects:** HTTP `3xx` answers are refused, never followed — the
+  collector talks to exactly one configured origin.
+- **TLS:** on Windows PowerShell 5.1 the protocol is pinned to TLS 1.2
+  exactly (no legacy SSL3/TLS1.0/1.1 flags carried over).
 - Heartbeat every `heartbeat_interval_seconds` (default 60, min 10).
 - Full inventory every `interval_seconds` (default 300, min 10).
 - Request timeout `timeout_seconds`; retries with exponential backoff
   (1s→2s→… capped 60s) on network errors, timeouts, 429/5xx; other 4xx fail
-  immediately. Sustained failure backs off up to 1 hour.
+  immediately. Enrollment is never retried (single-use token). Sustained
+  failure backs off up to 1 hour.
+- Warnings/logs carry path, status, attempt and the (single-line,
+  control-character-stripped) cause — never headers, bodies, credentials,
+  or multi-line text a remote peer could forge.
 - Revoked/rotated-away credential → 401 → collector stops with a clear error
   (no infinite hammering of the server).
 - The collector executes **nothing** received from the server: responses are
@@ -109,7 +130,7 @@ registry uninstall keys are user-readable machine hives).
 ## Tests
 
 ```powershell
-# Pester 5.5+ (Install-Module Pester -MinimumVersion 5.5 -Scope CurrentUser)
+# Pester 5.5+ / 6.x (Install-Module Pester -MinimumVersion 5.5 -Scope CurrentUser)
 Invoke-Pester -Path ./tests -CI
 
 # Static analysis (by-design exclusions documented in the settings file)

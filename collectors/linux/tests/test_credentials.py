@@ -88,3 +88,57 @@ def test_overwrite_rotates_in_place(tmp_path):
     save_credentials(cred_file, "ep-1", "eitop_ep_new")
     assert load_credentials(cred_file).credential == "eitop_ep_new"
     assert stat.S_IMODE(cred_file.stat().st_mode) == 0o600
+
+
+# --- Phase 6 audit L4/L5 ----------------------------------------------------
+
+
+def test_preexisting_parent_dir_is_never_chmodded(tmp_path):
+    """L4: save_credentials may only chmod a directory IT created —
+    touching a shared parent (e.g. /var/lib) would be catastrophic."""
+    import os as _os
+
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o755)
+    _os.chmod(shared, 0o755)
+    cred_file = shared / "credentials.json"
+
+    save_credentials(cred_file, "ep-1", "eitop_ep_value")
+
+    dir_mode = stat.S_IMODE(shared.stat().st_mode)
+    assert dir_mode == 0o755, f"pre-existing dir must stay untouched, got {oct(dir_mode)}"
+    assert stat.S_IMODE(cred_file.stat().st_mode) == 0o600
+
+
+def test_planted_predictable_tmp_is_not_touched(tmp_path):
+    """L5: the old fixed '<name>.tmp' could be pre-planted (symlink or
+    regular file) and written through. mkstemp names are random+exclusive,
+    so a planted file at the predictable name stays untouched."""
+    cred_file = tmp_path / "credentials.json"
+    planted = tmp_path / "credentials.json.tmp"
+    planted.write_text("attacker-planted-content")
+
+    save_credentials(cred_file, "ep-1", "eitop_ep_value")
+
+    assert planted.read_text() == "attacker-planted-content"
+    assert load_credentials(cred_file).credential == "eitop_ep_value"
+
+
+def test_save_leaves_no_temp_residue(tmp_path):
+    cred_file = tmp_path / "state" / "credentials.json"
+    save_credentials(cred_file, "ep-1", "eitop_ep_value")
+    leftovers = [p for p in cred_file.parent.iterdir() if p.name != "credentials.json"]
+    assert leftovers == []
+
+
+def test_load_refuses_file_owned_by_other_user(tmp_path, monkeypatch):
+    """L5: content we did not write is never trusted, even at mode 0600."""
+    cred_file = tmp_path / "credentials.json"
+    save_credentials(cred_file, "ep-1", "eitop_ep_value")
+
+    monkeypatch.setattr(
+        "eitop_collector.credentials.os.geteuid", lambda: 99999
+    )
+    with pytest.raises(CredentialError) as exc:
+        load_credentials(cred_file)
+    assert "owned by uid" in str(exc.value)

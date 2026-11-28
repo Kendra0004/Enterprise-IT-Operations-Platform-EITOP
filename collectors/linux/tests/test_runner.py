@@ -17,7 +17,7 @@ NEW_CRED = "eitop_ep_rotated000000000000000000000000"
 @pytest.fixture()
 def config(tmp_path) -> CollectorConfig:
     return CollectorConfig(
-        server_url="http://server.example:8080",
+        server_url="https://server.example:8443",
         credential_file=str(tmp_path / "creds" / "credentials.json"),
         max_retries=1,
         interval_seconds=10,
@@ -27,7 +27,7 @@ def config(tmp_path) -> CollectorConfig:
 
 def _client(handler, sleeps: list | None = None) -> EitopClient:
     return EitopClient(
-        "http://server.example:8080",
+        "https://server.example:8443",
         max_retries=1,
         transport=httpx.MockTransport(handler),
         sleep=(sleeps if sleeps is not None else []),

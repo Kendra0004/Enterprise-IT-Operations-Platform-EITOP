@@ -26,11 +26,17 @@ $script:BackoffCap = 60.0
 $script:RetryableStatus = @(429, 500, 502, 503, 504)
 
 function Enable-EitopTls12 {
-    # Windows PowerShell 5.1 may default to TLS 1.0 (dead on modern servers).
+    # Windows PowerShell 5.1 may default to TLS 1.0 (dead on modern
+    # servers). Phase 6 audit W6: pin the protocol to TLS 1.2 EXACTLY —
+    # the previous "-bor Tls12" kept whatever legacy flags were already
+    # set (SSL3/TLS1.0/TLS1.1), leaving a downgrade path open. .NET
+    # Framework on PS 5.1 has no TLS 1.3 enum, so 1.2 is the ceiling
+    # there; PowerShell 7 / .NET Core ignores ServicePointManager and
+    # uses the OS defaults (TLS 1.2+).
+    if ($PSVersionTable.PSEdition -ne 'Desktop') { return }
     try {
-        [Net.ServicePointManager]::SecurityProtocol =
-            [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    } catch { }  # PS7 / non-Windows: platform default already fine
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    } catch { }
 }
 
 function Get-EitopBackoffDelay {
@@ -83,12 +89,25 @@ function Invoke-EitopApiRequest {
 
         if ($result.kind -eq 'error') {
             # transport failure (timeout / DNS / refused)
-            $lastError = "network error: $($result.error)"
-            Write-Warning "request_network_error path=$Path attempt=$attempt"
+            # Phase 6 audit W8: the warning previously carried a fixed
+            # message with no cause — include the transport error (which
+            # never contains credentials) with control characters stripped
+            # so network text cannot forge log lines. The same sanitized
+            # cause goes into the final exception message.
+            $safeErr = "$($result.error)" -replace '[\r\n\t\x00-\x1f\x7f]+', ' '
+            if ($safeErr.Length -gt 200) { $safeErr = $safeErr.Substring(0, 200) }
+            $lastError = "network error: $safeErr"
+            Write-Warning "request_network_error path=$Path attempt=$attempt error=$safeErr"
             continue
         }
 
         $status = [int]$result.status
+        # Phase 6 audit W5/L3: 3xx is an error, never a detour we obey —
+        # the collector talks to exactly one configured origin.
+        if ($status -ge 300 -and $status -lt 400) {
+            throw [EitopApiError]::new(
+                "HTTP ${status}: unexpected redirect refused (collector never follows redirects)", $status)
+        }
         if ($status -lt 400) { return $result }
 
         if ($status -in $script:RetryableStatus -and $attempt -lt $MaxRetries) {
@@ -111,14 +130,28 @@ function Get-EitopDefaultInvoker {
             Headers     = $Headers
             TimeoutSec  = [int]$TimeoutSec
             ErrorAction = 'Stop'
+            # Phase 6 audit W5: never follow redirects — a 3xx must come
+            # back to Invoke-EitopApiRequest so it can be refused there,
+            # instead of silently replaying the request (with our bearer
+            # header) against whatever Location points at.
+            MaximumRedirection = 0
+            # PS 5.1: skip the IE-based HTML parser (PS 7 ignores this).
+            UseBasicParsing    = $true
         }
         if ($null -ne $Body) {
             $params['Body'] = $Body
             $params['ContentType'] = 'application/json'
         }
-        $response = Invoke-RestMethod @params
-        # Invoke-RestMethod already deserializes JSON on both 5.1 and 7.
-        [pscustomobject]@{ kind = 'response'; status = 200; data = $response }
+        $response = Invoke-WebRequest @params
+        # Report the REAL status code: the previous implementation
+        # hardcoded 200, which could mask a 3xx/2xx difference.
+        $status = [int]$response.StatusCode
+        $content = [string]$response.Content
+        $data = $null
+        if ($content) {
+            try { $data = $content | ConvertFrom-Json } catch { $data = $null }
+        }
+        [pscustomobject]@{ kind = 'response'; status = $status; data = $data; raw = $content }
     } catch {
         $statusCode = 0
         $parsed = $null
@@ -170,7 +203,11 @@ function Get-EitopProblemMessage {
             $detail = [string](Get-EitopJsonField -Object $parsed -Name 'detail')
         } catch { }
     }
-    ("HTTP $($Result.status): $title $detail").Trim()
+    # Server-supplied text lands in warnings and stderr: strip control
+    # characters so a hostile/compromised response cannot forge log lines
+    # (parity with Linux L7).
+    $message = ("HTTP $($Result.status): $title $detail").Trim()
+    ($message -replace '[\r\n\t\x00-\x1f\x7f]+', ' ').Trim()
 }
 
 # --- Agent endpoints (contract parity with collectors/linux api.py) ---------

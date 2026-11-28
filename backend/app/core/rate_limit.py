@@ -6,6 +6,7 @@ outage cannot silently disable brute-force protection.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from typing import cast
 
@@ -50,10 +51,20 @@ class RateLimiter:
 
 
 def client_ip(request: Request) -> str:
-    """Best-effort client IP (honors X-Forwarded-For when behind proxy)."""
+    """Resolve the real client IP for throttling and audit records.
+
+    Both production proxies OVERWRITE ``X-Forwarded-For`` with
+    ``$remote_addr`` (never append), so legitimate traffic carries exactly
+    one hop. When a multi-hop value appears it can only have come from a
+    client talking to the backend directly or from a future appending
+    proxy; the RIGHTMOST hop is the one added by the nearest proxy and is
+    therefore the trustworthy one (Phase 6 audit A5 — the previous
+    leftmost choice let a direct client pick its own rate-limit bucket
+    and audit IP by sending a forged header).
+    """
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        return forwarded.split(",")[0].strip()
+        return forwarded.split(",")[-1].strip()
     return request.client.host if request.client else "unknown"
 
 
@@ -62,6 +73,21 @@ def login_rate_limit(request: Request) -> None:
     RateLimiter("login", settings.rate_limit_login_per_minute).check(
         client_ip(request)
     )
+
+
+def login_email_rate_limit(email: str) -> None:
+    """Per-account login throttle (Phase 6 audit A6).
+
+    The IP bucket cannot stop credential stuffing distributed across many
+    source IPs; this second bucket caps attempts against one account no
+    matter where they come from. The key is a SHA-256 digest so raw
+    email addresses never appear in Redis keys.
+    """
+    settings = get_settings()
+    digest = hashlib.sha256(email.strip().lower().encode("utf-8")).hexdigest()
+    RateLimiter(
+        "login_email", settings.rate_limit_login_per_minute
+    ).check(digest)
 
 
 def refresh_rate_limit(request: Request) -> None:
@@ -83,6 +109,7 @@ __all__ = [
     "RateLimiter",
     "client_ip",
     "enroll_rate_limit",
+    "login_email_rate_limit",
     "login_rate_limit",
     "problem",
     "refresh_rate_limit",

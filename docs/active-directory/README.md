@@ -158,6 +158,21 @@ Backend logs (JSON) carry the same sanitized label plus the exception
 
 - **No write operations against AD** — remediation happens in AD
   tooling, then the next sync reflects it.
+- **Configuring a connection implies an SSRF-shaped surface (accepted)**:
+  `directory:write` (admin-equivalent) can aim the TLS probe and the bind
+  at an arbitrary `host:port`. This is inherent to "point EITOP at an
+  LDAP server"; it is gated by role and audit-logged — there is no
+  unauthenticated or read-only path to it.
+- **`search_base` DN syntax is validated at runtime, not at save time**:
+  a malformed DN surfaces as a classified sync-error label on the first
+  run rather than a 422 on create/update. This is *not* an injection
+  surface — the DN is never interpolated into an LDAP filter (constant
+  `(objectClass=*)`), and `bind_username` is transmitted only as the bind
+  name.
+- **Changing `host` or `tls_ca_pem` requires re-entering
+  `bind_password`** (422 otherwise): the stored password must never be
+  silently sent to a newly pointed target — credential and target are
+  bound together (Phase 6 AD-1).
 - **Microsoft AD real-environment validation is outstanding**: behavior
   is verified against test doubles/containers; a trial against a real
   Microsoft AD domain remains on the backlog (Phase reports).

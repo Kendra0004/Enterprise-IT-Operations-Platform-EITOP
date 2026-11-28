@@ -113,3 +113,41 @@ def test_package_list_is_truncated(monkeypatch):
     monkeypatch.setattr(pkgs, "_run", lambda argv: big)
     out, _ = pkgs.collect_packages(which=_fake_which("dpkg-query"))
     assert len(out) == pkgs.MAX_PACKAGES
+
+
+# --- Phase 6 audit L6: PATH / loader hardening ------------------------------
+
+
+def test_child_env_pins_path_and_strips_loader_vars(monkeypatch):
+    monkeypatch.setenv("PATH", "/attacker/bin:/usr/bin")
+    monkeypatch.setenv("LD_PRELOAD", "/attacker/evil.so")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/attacker/lib")
+    env = pkgs._child_env()
+    assert env["PATH"] == pkgs.SAFE_PATH
+    assert "LD_PRELOAD" not in env
+    assert "LD_LIBRARY_PATH" not in env
+
+
+def test_safe_which_resolves_against_pinned_path_only(monkeypatch):
+    seen: dict = {}
+
+    def fake_which(name, path=None):
+        seen["name"] = name
+        seen["path"] = path
+        return f"/usr/bin/{name}"
+
+    monkeypatch.setattr(pkgs.shutil, "which", fake_which)
+    assert pkgs._safe_which("rpm") == "/usr/bin/rpm"
+    assert seen["path"] == pkgs.SAFE_PATH
+
+
+def test_subprocess_receives_pinned_path_env(monkeypatch):
+    captured: dict = {}
+
+    def fake_run(argv, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="curl\t8.5.0\n")
+
+    monkeypatch.setattr(pkgs.subprocess, "run", fake_run)
+    pkgs.collect_dpkg()
+    assert captured["env"]["PATH"] == pkgs.SAFE_PATH

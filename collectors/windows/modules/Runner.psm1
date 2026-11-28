@@ -231,8 +231,15 @@ function Start-EitopLoop {
             $delay = Get-EitopLoopDelay -Failures $Failures -BaseInterval ([int]$Config.heartbeat_interval_seconds)
             $status = 0
             if ($_.Exception.PSObject.Properties['StatusCode']) { $status = $_.Exception.StatusCode }
-            # Log path/status/attempt only — never headers, bodies, or secrets.
-            Write-Warning "submission_failed attempt=$Failures next_retry=${delay}s status=$status"
+            # Log path/status/attempt plus the cause — never headers,
+            # bodies, or secrets. Phase 6 audit W8: this line used to be
+            # a fixed message with status=0 for every transport failure,
+            # which hid the actual cause from operators. Control
+            # characters are stripped so exception text (possibly echoing
+            # server responses) cannot forge log lines.
+            $cause = ([string]$_.Exception.Message) -replace '[\r\n\t\x00-\x1f\x7f]+', ' '
+            if ($cause.Length -gt 200) { $cause = $cause.Substring(0, 200) }
+            Write-Warning "submission_failed attempt=$Failures next_retry=${delay}s status=$status cause=$cause"
             & $Sleep $delay
             continue
         }

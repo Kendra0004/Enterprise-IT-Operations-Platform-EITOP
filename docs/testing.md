@@ -106,6 +106,14 @@ docker run --rm -v "$PWD/backend/requirements.txt":/r.txt:ro python:3.12-slim \
 cd frontend && npm audit
 ```
 
+Both run **in CI as failing gates** (`.github/workflows/ci.yml`):
+`pip-audit` over `requirements.txt` + `requirements-dev.txt`, and
+`npm audit --audit-level=high` after a strict `npm ci`. Known residual
+risk: requirements use range pins **without `--hash` values** —
+hash-pinning was deferred (a blind re-pin risks build breakage); see
+[architecture/security.md](architecture/security.md) § Explicit
+limitations.
+
 Production runtime dependencies are isolated in `requirements.txt` (the
 production image contains no test/lint tooling); dev tools live in
 `requirements-dev.txt`.

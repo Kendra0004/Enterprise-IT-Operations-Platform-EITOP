@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -12,7 +14,7 @@ from app.api.health import router as health_router
 from app.api.v1 import api_router
 from app.core.config import get_settings
 from app.core.exceptions import PROBLEM_MEDIA_TYPE, problem, register_exception_handlers
-from app.core.logging import setup_logging
+from app.core.logging import request_id_var, setup_logging
 
 API_V1_PREFIX = "/api/v1"
 
@@ -40,7 +42,14 @@ def _origin_check_middleware(app: FastAPI) -> None:
             and request.url.path.startswith(API_V1_PREFIX)
         ):
             origin = request.headers.get("origin")
-            if origin is not None and origin not in allowed:
+            # Defense-in-depth for clients that reach the API without an
+            # Origin header: browsers label cross-site requests via
+            # Sec-Fetch-Site. Non-browser clients send neither and are
+            # unaffected (Phase 6 audit A7).
+            cross_site = (
+                request.headers.get("sec-fetch-site", "").lower() == "cross-site"
+            )
+            if cross_site or (origin is not None and origin not in allowed):
                 return JSONResponse(
                     status_code=403,
                     content={
@@ -66,14 +75,31 @@ _BODY_LIMITS: tuple[tuple[str, int], ...] = (
 
 
 def _body_size_middleware(app: FastAPI) -> None:
-    """Reject oversized request bodies (Content-Length based, 413)."""
+    """Reject oversized request bodies (413) and enforce header discipline.
+
+    Content-Length carries the size; a chunked request has none, which
+    previously skipped every limit (Phase 6 audit A8). None of our
+    clients (frontend fetch, collectors, Pester) use chunked encoding,
+    and both reverse proxies buffer and re-send bodies with
+    Content-Length, so chunked requests to the API are refused outright
+    with 411 instead of being metered byte-by-byte.
+    """
     limits = sorted(_BODY_LIMITS, key=lambda item: -len(item[0]))
 
     @app.middleware("http")
     async def check_body_size(
         request: Request, call_next: RequestResponseEndpoint
     ) -> StarletteResponse:
-        if request.method in ("POST", "PUT", "PATCH"):
+        if request.method in ("POST", "PUT", "PATCH") and request.url.path.startswith(
+            API_V1_PREFIX
+        ):
+            if request.headers.get("transfer-encoding"):
+                return problem(
+                    411,
+                    "Length required",
+                    "Chunked transfer encoding is not supported; "
+                    "send a Content-Length header.",
+                )
             raw_length = request.headers.get("content-length")
             if raw_length is not None:
                 try:
@@ -95,14 +121,28 @@ def _body_size_middleware(app: FastAPI) -> None:
 
 
 def _security_headers_middleware(app: FastAPI) -> None:
-    """Baseline security headers on every response (API + errors)."""
+    """Baseline security headers + per-request correlation id.
+
+    ``X-Request-ID`` is ALWAYS synthesized here (never copied from the
+    request — an inbound value is attacker-controlled): the id is echoed
+    on the response and injected into every JSON log line produced while
+    handling the request, which is what makes request correlation real
+    (Phase 6 audit F15 — previously the header was exposed via CORS but
+    never set by anyone).
+    """
     settings = get_settings()
 
     @app.middleware("http")
     async def add_security_headers(
         request: Request, call_next: RequestResponseEndpoint
     ) -> StarletteResponse:
-        response = await call_next(request)
+        request_id = uuid.uuid4().hex
+        token = request_id_var.set(request_id)
+        try:
+            response = await call_next(request)
+        finally:
+            request_id_var.reset(token)
+        response.headers["X-Request-ID"] = request_id
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault(

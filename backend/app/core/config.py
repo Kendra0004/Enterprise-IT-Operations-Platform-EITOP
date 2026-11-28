@@ -26,7 +26,10 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = "INFO"
 
-    secret_key: str = Field(min_length=16)
+    # 32-char floor everywhere (Phase 6 audit A15): production already
+    # required ≥32, but a non-prod build with a 16-char HS256 key was
+    # silently accepted. One uniform floor, one place to reason about.
+    secret_key: str = Field(min_length=32)
     access_token_expire_minutes: int = Field(default=15, ge=1, le=60)
     refresh_token_expire_days: int = Field(default=7, ge=1, le=90)
     cors_origins: str = "http://localhost:5173,http://localhost:3000"

@@ -46,14 +46,26 @@ function Test-EitopIsWindows {
 }
 
 function Protect-EitopSecret {
-    # DPAPI CurrentUser encryption. Non-Windows dev/test hosts are supported
-    # only for mocked unit tests (callers mock this function there).
+    # DPAPI CurrentUser encryption — Windows only (Phase 6 audit W2).
+    # On non-Windows hosts ConvertFrom-SecureString "succeeds" with a
+    # reversible obfuscation that is NOT DPAPI: silently storing that
+    # would produce credentials.json that claims 'dpapi-currentuser'
+    # while any same-host process can decode it. Refuse instead; Pester
+    # tests mock this function (the test seam).
     param([Parameter(Mandatory)][securestring]$Secret)
+    if (-not (Test-EitopIsWindows)) {
+        throw [EitopCredentialError]::new(
+            'DPAPI is Windows-only: refusing to protect credentials on this platform.')
+    }
     ConvertFrom-SecureString -SecureString $Secret
 }
 
 function Unprotect-EitopSecret {
     param([Parameter(Mandatory)][string]$Protected)
+    if (-not (Test-EitopIsWindows)) {
+        throw [EitopCredentialError]::new(
+            'DPAPI is Windows-only: refusing to decrypt credentials on this platform.')
+    }
     $sec = ConvertTo-SecureString -String $Protected
     $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
     try {
@@ -75,22 +87,51 @@ function Set-EitopCredentialAcl {
     }
 }
 
+function Get-EitopRuleSid {
+    # Normalize an ACL identity reference to a SID string (Phase 6 audit
+    # W1): translation may fail for foreign/domain accounts — fall back
+    # to the raw value, which can never equal our own SID, so an
+    # unresolvable principal fails CLOSED instead of passing the check.
+    param($IdentityReference)
+    if ($null -eq $IdentityReference) { return '' }
+    if ($IdentityReference -is [System.Security.Principal.SecurityIdentifier]) {
+        return [string]$IdentityReference.Value
+    }
+    try {
+        return [string]$IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    } catch {
+        # Unresolvable principal (foreign account, plain string input,
+        # translate unsupported): return the RAW value — it can never
+        # equal our own SID, so the check fails CLOSED.
+        if ($IdentityReference.PSObject.Properties['Value']) {
+            return [string]$IdentityReference.Value
+        }
+        return [string]$IdentityReference
+    }
+}
+
 function Test-EitopCredentialAcl {
-    # True when only the current SID has rights to the file.
+    # True when only the current SID has rights to the file/directory.
+    #
+    # Phase 6 audit W1: the previous implementation parsed `icacls` TEXT
+    # and skipped every line that did not contain a literal SID — but
+    # icacls prints local ACCOUNT NAMES (BUILTIN\Users, NT AUTHORITY\…),
+    # so a credential file shared with other principals sailed through
+    # the check. Read the structured ACL instead and require EVERY rule
+    # (allow, deny, inherited, named or numeric) to be our own SID.
     param([Parameter(Mandatory)][string]$Path)
 
     if (-not (Test-EitopIsWindows)) { return $true }  # ACL checks are Windows-only
     $sid = Get-EitopCurrentSid
-    $out = & icacls.exe $Path 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) { return $false }
-    # Every explicit entry must be our SID; deny/allow entries for others fail.
-    foreach ($line in ($out -split "(`r`n|`n)")) {
-        $trimmed = $line.Trim()
-        if ($trimmed -match '^\d+ (success|failure)') { continue }
-        if ($trimmed -eq '' -and -not $env:TEMP) { continue }
-        if ($trimmed -match '^(Successfully|Failed)') { continue }
-        if ($trimmed -notmatch 'S-\d-\d+-\d+') { continue }
-        if ($trimmed -notmatch [regex]::Escape($sid)) { return $false }
+    try {
+        $acl = Get-Acl -LiteralPath $Path
+    } catch {
+        return $false
+    }
+    foreach ($rule in $acl.Access) {
+        if ((Get-EitopRuleSid -IdentityReference $rule.IdentityReference) -ne $sid) {
+            return $false
+        }
     }
     return $true
 }
@@ -104,8 +145,15 @@ function Save-EitopCredential {
     )
 
     $dir = Split-Path -Parent $Path
-    if ($dir -and -not (Test-Path -LiteralPath $dir)) {
-        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    if ($dir) {
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
+        # Phase 6 audit W7: apply the restrictive ACL EVERY time, not only
+        # when this call created the directory — a pre-existing directory
+        # (created by an installer, a copy, or an older version) may still
+        # carry inherited ACLs that expose the credential file's location
+        # to other users. icacls /inheritance:r /grant:r is idempotent.
         Set-EitopCredentialAcl -Path $dir
     }
 
@@ -136,6 +184,15 @@ function Read-EitopCredential {
     if (-not (Test-EitopCredentialAcl -Path $Path)) {
         throw [EitopCredentialError]::new(
             "Credential file $Path is accessible to other principals; reset ACL to the service account only.")
+    }
+    # Phase 6 audit W7: the DIRECTORY must be ours too — an open parent
+    # directory lets anyone list or replace the credential file even when
+    # the file's own ACL is tight.
+    $dir = Split-Path -Parent $Path
+    if ($dir -and (Test-Path -LiteralPath $dir -PathType Container) -and
+        -not (Test-EitopCredentialAcl -Path $dir)) {
+        throw [EitopCredentialError]::new(
+            "Directory $dir is accessible to other principals; reset its ACL to the service account only.")
     }
 
     try {
@@ -169,4 +226,4 @@ function Remove-EitopCredential {
 Export-ModuleMember -Function `
     Save-EitopCredential, Read-EitopCredential, Remove-EitopCredential, `
     Protect-EitopSecret, Unprotect-EitopSecret, Set-EitopCredentialAcl, `
-    Test-EitopCredentialAcl, Get-EitopCurrentSid, Test-EitopIsWindows
+    Test-EitopCredentialAcl, Get-EitopRuleSid, Get-EitopCurrentSid, Test-EitopIsWindows

@@ -1,9 +1,16 @@
 """Directory (read-only Active Directory) API (Phase 3.1, extended 3.2.2).
 
 Route conventions (mirrors endpoints.py):
-- ``Page`` + ``page/page_size/q/sort/order`` with per-resource sort
-  allowlists; ``connection_id`` is REQUIRED on every object list and
-  detail so results can never bleed across connections.
+- Object/finding/sync-run DETAIL and match decisions require an explicit
+  ``connection_id`` and are fetched through ``_scoped_or_404`` so an id
+  from one connection can never resolve against another (Phase 6 audit
+  F7: sync-run detail and ``decide_match`` previously did a bare
+  ``db.get`` while the docstring claimed universal scoping).
+- Collection LIST routes take ``connection_id`` as an optional filter:
+  listings are permission-scoped (``directory:read``) — there is no
+  tenancy model, so one deployment's readers can already enumerate every
+  connection via ``GET /directory/connections``. The optional filter
+  narrows a list; it is not a security boundary.
 - Every route declares its permission (``directory:read|write|sync``);
   the ``agent`` role holds none of them.
 - No response schema exposes the bind password or its ciphertext; LDAP
@@ -950,17 +957,14 @@ def decide_match(
     db: DbSession,
     request: Request,
     computer_id: uuid.UUID,
+    connection_id: uuid.UUID,
     payload: MatchDecisionIn,
     actor: DirectoryWrite,
 ) -> ReconciliationOut:
     """Manual match/reject decision — audited, never overwritten by syncs."""
-    computer = db.get(DirectoryComputer, computer_id)
-    if computer is None:
-        raise AppError(
-            status.HTTP_404_NOT_FOUND,
-            "Not found",
-            "The requested directory object does not exist.",
-        )
+    # Connection-scoped (Phase 6 audit F7): the computer must belong to the
+    # connection the caller names, matching every other object-detail route.
+    computer = _scoped_or_404(db, DirectoryComputer, computer_id, connection_id)
     if payload.decision == "match":
         if payload.endpoint_id is None:
             raise AppError(
@@ -1087,15 +1091,13 @@ def list_sync_runs(
 def get_sync_run(
     db: DbSession,
     run_id: uuid.UUID,
+    connection_id: uuid.UUID,
     _: DirectoryRead,
 ) -> SyncRunDetailOut:
-    row = db.get(DirectorySyncRun, run_id)
-    if row is None:
-        raise AppError(
-            status.HTTP_404_NOT_FOUND,
-            "Sync run not found",
-            "The sync run does not exist.",
-        )
+    # Connection-scoped (Phase 6 audit F7): run detail carries per-category
+    # results and error labels, so it resolves only against the connection
+    # the caller names — a mismatched id answers 404, never data.
+    row = _scoped_or_404(db, DirectorySyncRun, run_id, connection_id)
     return SyncRunDetailOut.model_validate(row)
 
 

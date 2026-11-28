@@ -5,13 +5,18 @@
 - Otherwise:     empty list (reported as manager "unknown" upstream)
 
 Safety: subprocess is invoked with an argument LIST (never shell=True),
-a timeout, and captured output. Missing commands or failures degrade to an
-empty list with a warning — collection never crashes the agent.
+a timeout, and captured output. The child's PATH is pinned to the
+standard system directories and loader hijack variables (LD_PRELOAD &
+co) are dropped (Phase 6 audit L6) — a collector that often runs as root
+must never execute whatever a caller-controlled PATH points at. Missing
+commands or failures degrade to an empty list with a warning — collection
+never crashes the agent.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 
@@ -21,8 +26,27 @@ COMMAND_TIMEOUT = 60  # seconds
 # Backend accepts up to 20000 package rows per submission.
 MAX_PACKAGES = 19000
 
+# The only PATH the collector trusts for package-manager binaries.
+SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# Environment keys that would let a crafted parent environment hijack the
+# child process (dynamic loader, interpreter overrides).
+_UNSAFE_ENV_PREFIXES = ("LD_", "DYLD_")
 
-def detect_package_manager(which=shutil.which) -> str | None:
+
+def _safe_which(name: str) -> str | None:
+    """Resolve a binary against SAFE_PATH only — never the ambient PATH."""
+    return shutil.which(name, path=SAFE_PATH)
+
+
+def _child_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["PATH"] = SAFE_PATH
+    for key in [k for k in env if k.startswith(_UNSAFE_ENV_PREFIXES)]:
+        del env[key]
+    return env
+
+
+def detect_package_manager(which=_safe_which) -> str | None:
     if which("dpkg-query"):
         return "dpkg"
     if which("rpm"):
@@ -33,12 +57,13 @@ def detect_package_manager(which=shutil.which) -> str | None:
 def _run(argv: list[str]) -> str | None:
     """Run a command safely; None on missing binary, timeout or failure."""
     try:
-        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell
+        proc = subprocess.run(  # noqa: S603 — fixed argv, no shell, pinned PATH
             argv,
             capture_output=True,
             text=True,
             timeout=COMMAND_TIMEOUT,
             check=False,
+            env=_child_env(),
         )
     except (FileNotFoundError, OSError):
         logger.warning("package_command_missing cmd=%s", argv[0])

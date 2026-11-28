@@ -55,6 +55,34 @@ def get_current_user(
 CurrentUser = Annotated[User, Depends(get_current_user)]
 
 
+def get_current_user_optional(
+    db: DbSession,
+    credentials: Annotated[
+        HTTPAuthorizationCredentials | None, Security(bearer_scheme)
+    ],
+) -> User | None:
+    """Best-effort user resolution for endpoints where the access token is
+    optional but a present one must still be valid (Phase 6 audit A2).
+
+    Returns ``None`` for missing/expired/tampered tokens instead of
+    raising; never returns a deactivated user.
+    """
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        return None
+    try:
+        payload = decode_access_token(credentials.credentials)
+        user_uuid = uuid.UUID(payload["sub"])
+    except (AppError, KeyError, ValueError):
+        return None
+    user = db.get(User, user_uuid)
+    if user is None or not user.is_active:
+        return None
+    return user
+
+
+OptionalCurrentUser = Annotated[User | None, Depends(get_current_user_optional)]
+
+
 def get_current_endpoint(
     db: DbSession,
     credentials: Annotated[

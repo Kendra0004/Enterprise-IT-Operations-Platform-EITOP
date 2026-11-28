@@ -91,6 +91,16 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    # PONG liveness in every environment (Phase 6 audit F18): previously
+    # the check existed only in the production overlay, so a wedged dev
+    # worker reported "Up" forever. `inspect ping` exits 0 even when no
+    # worker answers — grepping for `pong` is what makes the check real.
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A app.core.celery_app:celery_app inspect ping -d celery@$$HOSTNAME -t 5 2>/dev/null | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     restart: unless-stopped
     networks: [eitop]
     security_opt:
@@ -168,6 +178,12 @@ services:
     networks: [eitop]
     security_opt:
       - no-new-privileges:true
+    # Read-only rootfs like every other service (Phase 6 audit F11): only
+    # the pid file and nginx's proxy/client-body temp dirs are writable.
+    read_only: true
+    tmpfs:
+      - /tmp                 # nginx-unprivileged pid (/tmp/nginx.pid)
+      - /var/cache/nginx      # proxy/client-body temp for buffered API calls
 
 volumes:
   pgdata:

@@ -7,6 +7,7 @@ are never attached to log records; callers must not pass them as ``extra``.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import sys
@@ -17,6 +18,13 @@ from typing import Any
 _RESERVED = set(
     logging.LogRecord("", 0, "", 0, "", (), None).__dict__.keys()
 ) | {"message", "asctime", "taskName"}
+
+# Per-request correlation id (Phase 6 audit F15). Set by the HTTP layer
+# for the duration of one request; never populated outside a request so
+# background/worker logs carry no stale id.
+request_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "eitop_request_id", default=None
+)
 
 
 class JsonFormatter(logging.Formatter):
@@ -29,6 +37,9 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
+        request_id = request_id_var.get()
+        if request_id:
+            payload["request_id"] = request_id
         for key, value in record.__dict__.items():
             if key not in _RESERVED and not key.startswith("_"):
                 payload[key] = value

@@ -394,7 +394,11 @@ def test_sync_failure_is_fully_sanitized_end_to_end(
     assert SENTINEL not in caplog.text
 
     # The API returns exactly the same sanitized artifact.
-    detail = client.get(f"{API}/sync-runs/{run_id}", headers=auth_headers)
+    detail = client.get(
+        f"{API}/sync-runs/{run_id}",
+        headers=auth_headers,
+        params={"connection_id": created["id"]},
+    )
     assert detail.status_code == 200
     assert SENTINEL not in detail.text
     label = run.category_results["connect"]["label"]
@@ -713,12 +717,20 @@ def test_sync_history_filters_and_detail(client, auth_headers, db):
     assert resp.json()["total"] == 1
 
     failed = resp.json()["items"][0]
-    detail = client.get(f"{API}/sync-runs/{failed['id']}", headers=auth_headers)
+    detail = client.get(
+        f"{API}/sync-runs/{failed['id']}",
+        headers=auth_headers,
+        params={"connection_id": connection_id},
+    )
     assert detail.status_code == 200
     assert detail.json()["errors"][0]["label"] == "timeout"
     assert detail.json()["category_results"]["connect"]["status"] == "success"
 
-    missing = client.get(f"{API}/sync-runs/{uuid.uuid4()}", headers=auth_headers)
+    missing = client.get(
+        f"{API}/sync-runs/{uuid.uuid4()}",
+        headers=auth_headers,
+        params={"connection_id": connection_id},
+    )
     assert missing.status_code == 404
 
 
@@ -767,6 +779,7 @@ def test_manual_match_and_reject(client, auth_headers, db):
     resp = client.post(
         f"{API}/computers/{computer.id}/match",
         headers=auth_headers,
+        params={"connection_id": connection_id},
         json={"decision": "match", "endpoint_id": str(endpoint.id)},
     )
     assert resp.status_code == 201, resp.text
@@ -789,6 +802,7 @@ def test_manual_match_and_reject(client, auth_headers, db):
     resp = client.post(
         f"{API}/computers/{computer.id}/match",
         headers=auth_headers,
+        params={"connection_id": connection_id},
         json={"decision": "reject"},
     )
     assert resp.status_code == 201
@@ -798,11 +812,13 @@ def test_manual_match_and_reject(client, auth_headers, db):
 
 def test_match_requires_explicit_valid_endpoint(client, auth_headers, db):
     created = _create(client, auth_headers)
-    computer = _seed_computer(db, uuid.UUID(created["id"]))
+    connection_id = uuid.UUID(created["id"])
+    computer = _seed_computer(db, connection_id)
 
     resp = client.post(
         f"{API}/computers/{computer.id}/match",
         headers=auth_headers,
+        params={"connection_id": connection_id},
         json={"decision": "match"},
     )
     assert resp.status_code == 400
@@ -810,6 +826,7 @@ def test_match_requires_explicit_valid_endpoint(client, auth_headers, db):
     resp = client.post(
         f"{API}/computers/{computer.id}/match",
         headers=auth_headers,
+        params={"connection_id": connection_id},
         json={"decision": "match", "endpoint_id": str(uuid.uuid4())},
     )
     assert resp.status_code == 404
@@ -820,6 +837,7 @@ def test_match_requires_explicit_valid_endpoint(client, auth_headers, db):
     resp = client.post(
         f"{API}/computers/{computer.id}/match",
         headers=auth_headers,
+        params={"connection_id": connection_id},
         json={"decision": "match", "endpoint_id": str(endpoint.id)},
     )
     assert resp.status_code == 400
@@ -864,7 +882,106 @@ def test_readonly_cannot_decide_matches(client, auth_headers, readonly_user, db)
     resp = client.post(
         f"{API}/computers/{computer.id}/match",
         headers=headers,
+        params={"connection_id": connection_id},
         json={"decision": "match", "endpoint_id": str(endpoint.id)},
     )
     assert resp.status_code == 403
     assert "directory:write" in resp.json()["detail"]
+
+
+def test_sync_run_detail_and_match_are_connection_scoped(
+    client, auth_headers, db
+):
+    """Phase 6 audit F7: ids must not resolve across connections.
+
+    Sync-run detail and match decisions now take a required
+    ``connection_id`` and 404 when the row belongs to another
+    connection (previously a bare ``db.get`` accepted any id).
+    """
+    a = _create(client, auth_headers)
+    b = _create(client, auth_headers)
+    conn_a = uuid.UUID(a["id"])
+    conn_b = uuid.UUID(b["id"])
+
+    run = DirectorySyncRun(
+        connection_id=conn_a, status="success", trigger="manual"
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+
+    # Right connection → 200
+    ok = client.get(
+        f"{API}/sync-runs/{run.id}",
+        headers=auth_headers,
+        params={"connection_id": conn_a},
+    )
+    assert ok.status_code == 200
+
+    # Wrong connection → 404, no data
+    cross = client.get(
+        f"{API}/sync-runs/{run.id}",
+        headers=auth_headers,
+        params={"connection_id": conn_b},
+    )
+    assert cross.status_code == 404
+
+    # Missing connection_id → 422 (required parameter)
+    missing = client.get(f"{API}/sync-runs/{run.id}", headers=auth_headers)
+    assert missing.status_code == 422
+
+    # Same rule for match decisions
+    computer = _seed_computer(db, conn_a)
+    endpoint = _seed_endpoint(db)
+    cross_match = client.post(
+        f"{API}/computers/{computer.id}/match",
+        headers=auth_headers,
+        params={"connection_id": conn_b},
+        json={"decision": "match", "endpoint_id": str(endpoint.id)},
+    )
+    assert cross_match.status_code == 404
+
+
+def test_retargeting_host_requires_bind_password_reentry(client, auth_headers):
+    """Phase 6 audit AD1: retargeting the connection must not silently
+    ship the stored AD password to the new host/CA."""
+    created = _create(client, auth_headers)
+
+    # Host change without re-entering the password → 422, row unchanged.
+    refused = client.patch(
+        f"{API}/connections/{created['id']}",
+        headers=auth_headers,
+        json={"host": "attacker.example"},
+    )
+    assert refused.status_code == 422
+    assert "bind password" in refused.json()["detail"].lower()
+
+    detail = client.get(
+        f"{API}/connections/{created['id']}", headers=auth_headers
+    )
+    assert detail.json()["host"] != "attacker.example"
+
+    # Same change WITH the password re-entered → applied.
+    accepted = client.patch(
+        f"{API}/connections/{created['id']}",
+        headers=auth_headers,
+        json={"host": "attacker.example", "bind_password": "Reentered-Secret!1"},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["host"] == "attacker.example"
+
+    # Clearing the TLS CA (verification-policy change) also retargets.
+    ca_refused = client.patch(
+        f"{API}/connections/{created['id']}",
+        headers=auth_headers,
+        json={"tls_ca_pem": None},
+    )
+    assert ca_refused.status_code == 422
+
+    # Null bind_password is a 422 (previously an unhandled 500 — AD2).
+    null_pw = client.patch(
+        f"{API}/connections/{created['id']}",
+        headers=auth_headers,
+        json={"bind_password": None},
+    )
+    assert null_pw.status_code == 422

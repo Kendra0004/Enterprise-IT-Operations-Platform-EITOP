@@ -133,6 +133,23 @@ def update_connection(
 ) -> DirectoryConnection:
     """Partial update. Audits changed field NAMES — never values of secrets."""
     data = payload.model_dump(exclude_unset=True)
+    # Phase 6 audit AD1: the bind password is advertised write-only, but
+    # PATCHing ``host`` (or ``tls_ca_pem``) used to silently retarget
+    # where the decrypted credential is sent — the next test/sync would
+    # hand the AD password to an attacker listener validated by an
+    # attacker CA. Changing the target therefore requires re-entering
+    # the credential in the same request.
+    retargeted = ("host" in data and data["host"] != row.host) or (
+        "tls_ca_pem" in data and data["tls_ca_pem"] != row.tls_ca_pem
+    )
+    if retargeted and not data.get("bind_password"):
+        raise AppError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "bind_password required",
+            "Changing host or TLS CA requires re-entering the bind "
+            "password so the credential is never sent to a new target "
+            "unchecked.",
+        )
     if "name" in data and data["name"] != row.name:
         clash = db.scalar(
             select(DirectoryConnection).where(
@@ -148,7 +165,17 @@ def update_connection(
             )
     changes: list[str] = []
     if "bind_password" in data:
-        row.bind_password_encrypted = encrypt_password(data.pop("bind_password"))
+        new_password = data.pop("bind_password")
+        # Pydantic's min_length does not reject an explicit JSON null, and
+        # encrypt_password(None) used to escape as an unhandled ValueError
+        # → 500 (Phase 6 audit AD2). Null/blank is a 422, not a crash.
+        if not isinstance(new_password, str) or not new_password.strip():
+            raise AppError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "Invalid bind password",
+                "bind_password must be a non-empty string when provided.",
+            )
+        row.bind_password_encrypted = encrypt_password(new_password)
         changes.append("bind_password")
     for field, value in data.items():
         if getattr(row, field) != value:
@@ -324,6 +351,13 @@ def trigger_sync(
     a ``running`` row never survives a failed enqueue, so retries work.
     """
     run = create_sync_run(db, row, trigger=trigger, actor=actor, request=request)
+    # Publish the run row BEFORE the task exists (Phase 6 audit AD4): the
+    # worker loads the row as soon as it can receive the task, and the
+    # route's commit only happens after this function returns — without
+    # this commit the worker can see "no such run" while the INSERT is
+    # still open, silently skipping a run that later commits as
+    # unowned ``running`` (self-healing only via the 30-minute reaper).
+    db.commit()
     try:
         celery_app.send_task(SYNC_TASK_NAME, args=[str(run.id)])
     except Exception:  # noqa: BLE001 - broker failure must not strand the run

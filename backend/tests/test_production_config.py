@@ -45,7 +45,10 @@ class TestProductionValidation:
         ],
     )
     def test_weak_or_placeholder_secret_rejected(self, key: str) -> None:
-        with pytest.raises(ValidationError, match="SECRET_KEY"):
+        # Rejection may surface from the global 32-char floor (pydantic,
+        # loc "secret_key") or from the production placeholder checks
+        # (messages say "SECRET_KEY") — either way it must not validate.
+        with pytest.raises(ValidationError, match="(?i)secret_key"):
             _prod(secret_key=key)
 
     def test_dev_database_credentials_rejected(self) -> None:

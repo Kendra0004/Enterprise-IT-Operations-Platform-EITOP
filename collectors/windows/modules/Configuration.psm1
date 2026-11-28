@@ -78,6 +78,17 @@ function Read-EitopConfig {
         -SourcePath ([string]$chosen)
 }
 
+function Get-EitopRedactedUrl {
+    # Strip userinfo (user:password@) before a URL can reach an error
+    # message or log line (parity with the Linux collector, L7).
+    param([Parameter(Mandatory)][string]$Url)
+    if ($Url -match '^(?<scheme>[a-zA-Z][a-zA-Z0-9+.\-]*://)(?<userinfo>[^/?#]*)@') {
+        return ($Url -replace [regex]::Escape($Matches['scheme'] + $Matches['userinfo'] + '@'),
+            ($Matches['scheme'] + '***:***@'))
+    }
+    return $Url
+}
+
 function New-EitopConfig {
     [CmdletBinding()]
     param(
@@ -92,7 +103,20 @@ function New-EitopConfig {
 
     $url = $ServerUrl.TrimEnd('/')
     if ($url -notmatch '^https?://') {
-        throw [EitopConfigError]::new("server_url must be http(s), got: $url")
+        throw [EitopConfigError]::new("server_url must be http(s), got: $(Get-EitopRedactedUrl -Url $url)")
+    }
+    # Phase 6 audit W3 (parity with Linux L1): the collector sends the
+    # endpoint credential as a bearer token — plaintext http to a remote
+    # host is sniffable. Only loopback may stay http (dev/demo stacks).
+    if ($url -match '^http://') {
+        $uri = $null
+        try { $uri = [Uri]$url } catch { $uri = $null }
+        $hostName = if ($uri) { $uri.Host.Trim('[', ']') } else { '' }
+        $isLoopback = $hostName -eq 'localhost' -or $hostName -eq '::1' -or $hostName -like '127.*'
+        if (-not $isLoopback) {
+            throw [EitopConfigError]::new(
+                "server_url must use https for non-loopback hosts (plaintext http is only allowed for localhost): $(Get-EitopRedactedUrl -Url $url)")
+        }
     }
     if ($IntervalSeconds -lt 10) { throw [EitopConfigError]::new('interval_seconds must be >= 10') }
     if ($HeartbeatIntervalSeconds -lt 10) { throw [EitopConfigError]::new('heartbeat_interval_seconds must be >= 10') }
@@ -110,4 +134,4 @@ function New-EitopConfig {
     }
 }
 
-Export-ModuleMember -Function Read-EitopConfig, New-EitopConfig, Get-EitopDefaultConfigPaths
+Export-ModuleMember -Function Read-EitopConfig, New-EitopConfig, Get-EitopDefaultConfigPaths, Get-EitopRedactedUrl

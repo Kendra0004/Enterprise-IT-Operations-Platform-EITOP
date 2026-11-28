@@ -230,3 +230,87 @@ Describe 'no server-supplied execution' {
         }
     }
 }
+
+Describe 'redirect refusal and default invoker (Phase 6 W5/L3)' {
+    BeforeEach {
+        $script:cfg = New-TestConfig
+        $script:Calls = [System.Collections.ArrayList]::new()
+        $script:Sleeps = [System.Collections.ArrayList]::new()
+    }
+
+    It 'refuses a 3xx answer without following or retrying it' {
+        $invoker = New-RecordingInvoker -Calls $script:Calls -Sleeps $script:Sleeps -Responder {
+            param($m, $u, $h, $b, $n)
+            [pscustomobject]@{ kind = 'response'; status = 302; data = @{ location = 'https://attacker.example' } }
+        }
+        { Invoke-EitopApiRequest -Config $script:cfg -Method POST -Path '/api/v1/agent/heartbeat' `
+                -Body @{} -Credential $script:Cred -Invoker $invoker -Sleep { } } |
+            Should -Throw -ExpectedMessage '*redirect*'
+        $script:Calls.Count | Should -Be 1
+    }
+
+    It 'default invoker passes MaximumRedirection 0 and never follows' {
+        Mock -ModuleName ApiClient Invoke-WebRequest {
+            [pscustomobject]@{ StatusCode = 302; Content = '' }
+        }
+        { Invoke-EitopApiRequest -Config $script:cfg -Method POST -Path '/api/v1/agent/heartbeat' `
+                -Body @{} -Credential $script:Cred -Sleep { } } |
+            Should -Throw -ExpectedMessage '*redirect*'
+        Should -Invoke -CommandName Invoke-WebRequest -ModuleName ApiClient -Times 1 -Exactly `
+            -ParameterFilter { $MaximumRedirection -eq 0 -and $UseBasicParsing -eq $true }
+    }
+
+    It 'default invoker reports the REAL status code and parses the JSON body' {
+        Mock -ModuleName ApiClient Invoke-WebRequest {
+            [pscustomobject]@{ StatusCode = 201; Content = '{"endpoint_id":"ep-1","credential":"x"}' }
+        }
+        $result = Invoke-EitopApiRequest -Config $script:cfg -Method POST -Path '/api/v1/agent/enroll' `
+            -Body @{ token = 'tok' } -Sleep { } -MaxRetries 0
+        $result.status | Should -Be 201
+        $result.data.endpoint_id | Should -Be 'ep-1'
+        Should -Invoke -CommandName Invoke-WebRequest -ModuleName ApiClient -Times 1 -Exactly
+    }
+
+    It 'network errors include the cause in the warning, single-line' {
+        $invoker = New-RecordingInvoker -Calls $script:Calls -Sleeps $script:Sleeps -Responder {
+            param($m, $u, $h, $b, $n)
+            [pscustomobject]@{ kind = 'error'; error = "connection refused`nforged log line" }
+        }
+        { Invoke-EitopApiRequest -Config $script:cfg -Method POST -Path '/api/v1/agent/heartbeat' `
+                -Body @{} -Credential $script:Cred -Invoker $invoker -Sleep { } -MaxRetries 0 } |
+            Should -Throw -ExpectedMessage '*network error*'
+        # The thrown message carries the (single-line) cause.
+        try {
+            Invoke-EitopApiRequest -Config $script:cfg -Method POST -Path '/api/v1/agent/heartbeat' `
+                -Body @{} -Credential $script:Cred -Invoker $invoker -Sleep { } -MaxRetries 0
+        } catch {
+            $_.Exception.Message | Should -Match 'connection refused'
+            $_.Exception.Message | Should -Not -Match "`n"
+        }
+    }
+
+    It 'problem messages strip control characters from server text' {
+        $result = [pscustomobject]@{
+            kind = 'response'; status = 400
+            data = @{ title = "Bad`nRequest"; detail = "line1`r`nforged INFO entry" }
+        }
+        $message = Get-EitopProblemMessage -Result $result
+        $message | Should -Not -Match "`r"
+        $message | Should -Not -Match "`n"
+        $message | Should -Match 'forged INFO entry'
+    }
+}
+
+Describe 'TLS pinning (Phase 6 W6)' {
+    It 'Enable-EitopTls12 runs without error on this platform' {
+        { Enable-EitopTls12 } | Should -Not -Throw
+    }
+
+    It 'pins TLS 1.2 exactly on Windows PowerShell 5.1 (no legacy downgrade)' {
+        $code = Get-Content -LiteralPath (Join-Path $script:Root 'modules/ApiClient.psm1') -Raw
+        # The legacy "-bor Tls12" OR-in (which kept SSL3/TLS1.0/1.1 flags)
+        # must be gone; the assignment must be exact.
+        $code | Should -Not -Match 'SecurityProtocol\s*=\s*\[Net.ServicePointManager\]::SecurityProtocol\s*-bor'
+        $code | Should -Match '\[Net.ServicePointManager\]::SecurityProtocol\s*=\s*\[Net.SecurityProtocolType\]::Tls12'
+    }
+}

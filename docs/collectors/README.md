@@ -9,7 +9,7 @@ a per-endpoint credential. No inbound ports are opened on endpoints.
 | Language | Python 3 | PowerShell 5.1 / 7 |
 | Entry point | `eitop-collector` (CLI) | `eitop-collector.ps1` |
 | Source | `collectors/linux/` | `collectors/windows/` |
-| Tests | pytest (69) | Pester (113) |
+| Tests | pytest (90) | Pester (133) |
 | Credential storage | file, mode `0600` | DPAPI (CurrentUser) + ACL |
 | Detail docs | [../endpoints/linux-collector.md](../endpoints/linux-collector.md) | [../endpoints/windows-collector.md](../endpoints/windows-collector.md) |
 

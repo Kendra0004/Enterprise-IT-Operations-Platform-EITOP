@@ -24,7 +24,7 @@ import sys
 from eitop_collector import __version__
 from eitop_collector.api import CollectorError
 from eitop_collector.collect import collect_all
-from eitop_collector.config import ConfigError, load_config
+from eitop_collector.config import ConfigError, load_config, redact_url
 from eitop_collector.credentials import CredentialError, load_credentials
 from eitop_collector.runner import Runner
 
@@ -96,7 +96,8 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"endpoint_id: {stored.endpoint_id}")
         print(f"credential_file: {config.credential_file} (mode 0600)")
-        print(f"server_url: {config.server_url}")
+        # Redacted: a server_url may carry basic-auth userinfo (L7).
+        print(f"server_url: {redact_url(config.server_url)}")
         return 0
 
     runner = Runner(config)

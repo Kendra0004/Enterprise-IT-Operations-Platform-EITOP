@@ -22,7 +22,7 @@ def _client(handler, retries: int = 2, sleep=None) -> tuple[EitopClient, list]:
 
     sleeps: list[float] = []
     client = EitopClient(
-        "http://server.example:8080",
+        "https://server.example:8443",
         max_retries=retries,
         transport=httpx.MockTransport(counting_handler),
         sleep=sleep or (lambda s: sleeps.append(s)),
@@ -180,6 +180,96 @@ def test_enroll_response_missing_credential_raises():
     client, _ = _client(handler)
     with pytest.raises(CollectorError):
         client.enroll("tok-12345678901234567890", {"hostname": "h"})
+
+
+# --- Phase 6 audit additions (L1/L3/L7/L8) ---------------------------------
+
+
+def test_client_rejects_plaintext_remote_url():
+    """L1: bearer credentials never travel to a remote host over http."""
+    from eitop_collector.config import ConfigError
+
+    with pytest.raises(ConfigError, match="https"):
+        EitopClient("http://server.example:8080")
+
+
+def test_client_accepts_loopback_http_and_https():
+    from eitop_collector.config import ConfigError  # noqa: F401
+
+    for url in (
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "https://server.example:8443",
+    ):
+        client = EitopClient(url, transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={})
+        ))
+        client.close()
+
+
+def test_redirect_is_refused_not_followed():
+    """L3: a 3xx answer is an error — never a redirection we obey."""
+    client, calls = _client(
+        lambda request: httpx.Response(
+            302, headers={"location": "https://attacker.example/steal"}
+        ),
+        retries=3,
+    )
+    with pytest.raises(CollectorError) as exc:
+        client.heartbeat(CRED, "0.1.0")
+    assert exc.value.status_code == 302
+    assert "redirect" in str(exc.value)
+    assert len(calls) == 1  # redirects are not retryable either
+
+
+def test_non_json_success_body_raises_collector_error():
+    """L3: a 200 with an HTML body must surface as CollectorError."""
+    client, _ = _client(
+        lambda request: httpx.Response(200, text="<html>hi</html>"),
+        retries=0,
+    )
+    with pytest.raises(CollectorError, match="not valid JSON"):
+        client.heartbeat(CRED, "0.1.0")
+
+
+def test_enroll_is_never_retried_on_5xx():
+    """L8: the enrollment token is single-use — no blind replays."""
+    client, calls = _client(
+        lambda request: httpx.Response(503, json={"title": "Unavailable"}),
+        retries=5,
+    )
+    with pytest.raises(CollectorError):
+        client.enroll("tok-12345678901234567890", {"hostname": "h"})
+    assert len(calls) == 1
+
+
+def test_enroll_is_never_retried_on_network_error():
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    client, calls = _client(handler, retries=5)
+    with pytest.raises(CollectorError, match="Giving up after 1 attempts"):
+        client.enroll("tok-12345678901234567890", {"hostname": "h"})
+    assert len(calls) == 1
+
+
+def test_problem_detail_control_chars_are_stripped():
+    """L7: server-supplied text cannot forge log lines via CR/LF."""
+    client, _ = _client(
+        lambda request: httpx.Response(
+            400,
+            json={
+                "title": "Bad\nRequest\tforged",
+                "detail": "line1\r\nINFO fake log entry",
+            },
+        ),
+        retries=0,
+    )
+    with pytest.raises(CollectorError) as exc:
+        client.heartbeat(CRED, "0.1.0")
+    message = str(exc.value)
+    assert "\n" not in message and "\r" not in message and "\t" not in message
+    assert "fake log entry" in message  # content kept, control chars gone
 
 
 def json_body(request: httpx.Request) -> dict:

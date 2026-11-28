@@ -9,8 +9,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request, Response, status
 
-from app.api.deps import CurrentUser, DbSession
-from app.core.rate_limit import login_rate_limit, refresh_rate_limit
+from app.api.deps import CurrentUser, DbSession, OptionalCurrentUser
+from app.core.rate_limit import login_email_rate_limit, login_rate_limit, refresh_rate_limit
 from app.core.security import (
     REFRESH_COOKIE_NAME,
     clear_refresh_cookie,
@@ -43,6 +43,9 @@ def login(
     _: None = Depends(login_rate_limit),
 ) -> TokenResponse:
     """Exchange credentials for an access token + HttpOnly refresh cookie."""
+    # Second, per-account throttle (Phase 6 audit A6): the IP bucket above
+    # cannot stop distributed credential stuffing spread across many IPs.
+    login_email_rate_limit(payload.email)
     tokens, raw_refresh = auth_service.login(db, request, payload.email, payload.password)
     set_refresh_cookie(response, raw_refresh, tokens.refresh_expires_in)
     return tokens
@@ -67,9 +70,16 @@ def logout(
     request: Request,
     response: Response,
     db: DbSession,
-    user: CurrentUser,
+    user: OptionalCurrentUser,
 ) -> None:
-    """Revoke the caller's refresh token family and clear the cookie."""
+    """Revoke the caller's refresh token family and clear the cookie.
+
+    The refresh cookie alone authorizes revocation (the access JWT is
+    only consulted to attribute the audit event and to reject a cookie
+    that belongs to a different account). Logout therefore succeeds —
+    and actually kills the session — even after the access token
+    expired.
+    """
     raw = request.cookies.get(REFRESH_COOKIE_NAME, "")
     auth_service.logout(db, request, raw, user)
     clear_refresh_cookie(response)
